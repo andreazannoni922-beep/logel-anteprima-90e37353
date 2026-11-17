@@ -20,21 +20,17 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Jost:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/stile.css">
 <link rel="stylesheet" href="css/sezioni.css">
+<link rel="stylesheet" href="js/rb/electriclogo.css">
+<link rel="stylesheet" href="js/rb/topography.css">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Organization","name":"Logel s.r.l.","url":"https://www.logel.it/","logo":"https://www.logel.it/img/logo.svg","foundingDate":"1979","vatID":"IT02198670362","email":"logel@logel.it","telephone":"+39 059 536064","address":{"@type":"PostalAddress","streetAddress":"Via della Tecnica 13/A","postalCode":"41051","addressLocality":"Castelnuovo Rangone","addressRegion":"MO","addressCountry":"IT"},"hasCredential":[{"@type":"EducationalOccupationalCredential","name":"ISO 9001:2015 (TÜV Rheinland)"},{"@type":"EducationalOccupationalCredential","name":"UL508A"}],"knowsAbout":["Quadri elettrici","Cablaggi bordo macchina","Software PLC","Schede elettroniche","Controllo planarità piastrelle"]}
 </script>
 </head>
 <body>
 
-<!-- apertura: cinque scatti dell'officina, quello centrale diventa la hero (ossatura Cryox) -->
+<!-- apertura: il marchio Logel attraversato dalla corrente (React Bits ElectricLogo) -->
 <div class="intro" aria-hidden="true">
-  <div class="intro__strip">
-    <div class="intro__tile"><img src="img/barra-rame.webp" alt=""></div>
-    <div class="intro__tile"><img src="img/canaline.webp" alt=""></div>
-    <div class="intro__tile intro__tile--main"><img src="img/plc.webp" alt=""></div>
-    <div class="intro__tile"><img src="img/scheda.webp" alt=""></div>
-    <div class="intro__tile"><img src="img/perforex.webp" alt=""></div>
-  </div>
+  <div class="intro__fx"></div>
   <p class="intro__line mono"><span>Progettiamo</span> <span>·</span> <span>cabliamo</span> <span>·</span> <span>programmiamo</span> <span>·</span> <span>dal 1979</span></p>
 </div>
 
@@ -61,6 +57,7 @@
 
 <!-- HERO -->
 <section class="hero" id="top">
+ <div class="hero__pin">
   <div class="hero__stage">
     <canvas class="hero__gl" aria-label="Un quadro elettrico Logel disegnato in punti di luce: scegli un reparto per smontarlo"></canvas>
     <div class="hero__tip" aria-hidden="true"></div>
@@ -83,6 +80,9 @@
   <nav class="hero__reparti" aria-label="Reparti del quadro">
     <button type="button" data-i="0">Carpenteria</button><button type="button" data-i="1">Cablaggio</button><button type="button" data-i="2">PLC e software</button><button type="button" data-i="3">Elettronica</button><button type="button" data-i="4">Bordo macchina</button><button type="button" data-i="5">Pannello operatore</button>
   </nav>
+  <div class="hero__callouts" aria-hidden="true"></div>
+  <p class="hero__cue mono">Scorri: il quadro si apre</p>
+ </div>
 </section>
 
 <!-- TRE FRASI FISSATE (Cryox) con la traccia di corrente -->
@@ -153,6 +153,7 @@
 
 <!-- CALIBRO PLANAR: scansione dal vivo (HorizonX halftone-field) -->
 <section class="calibro" id="calibro">
+  <div class="calibro__topo" aria-hidden="true"></div>
   <div class="calibro__scan chamfer">
     <iframe src="fx/scan-evoplan.html" title="Scansione del sistema Evo-Plan" loading="lazy"></iframe>
   </div>
@@ -217,5 +218,6 @@
 <script src="js/main.js"></script>
 <script type="module" src="js/hero.js"></script>
 <script type="module" src="js/sezioni.js"></script>
+<script type="module" src="js/pezzi-rb.js"></script>
 </body>
 </html>

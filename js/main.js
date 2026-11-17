@@ -57,25 +57,20 @@
     const t = $(a.getAttribute('href')); if (!t) return; e.preventDefault(); lenis.scrollTo(t, { offset: -40 });
   }));
 
-  // apertura: i cinque scatti entrano, quello centrale si allarga fino a diventare la hero
+  // apertura: il marchio crepita di corrente, poi si spegne e lascia il quadro
   lenis.stop();
-  const main = $('.intro__tile--main');
   const tl = gsap.timeline({ defaults: { ease: 'power3.out' }, onComplete: () => { intro.classList.add('done'); lenis.start(); setTab(0); } });
-  tl.call(() => { window.__introDone = true; dispatchEvent(new Event('logel:intro')); }, null, 3.2);
-  tl.to('.intro__tile', { opacity: 1, y: 0, duration: .7, stagger: .08 })
-    .to('.intro__line span', { opacity: 1, duration: .25, stagger: .07 }, '-=.3')
-    .to('.intro__tile:not(.intro__tile--main), .intro__line', { opacity: 0, duration: .45, ease: 'power2.in' }, '+=.45')
-    .add(() => {
-      const r = main.getBoundingClientRect();
-      gsap.set(main, { position: 'fixed', left: r.left, top: r.top, width: r.width, height: r.height, margin: 0 });
-    })
-    .to(main, { left: 0, top: 0, width: innerWidth, height: innerHeight, duration: 1.1, ease: 'expo.inOut' })
-    .to(intro, { opacity: 0, duration: .5 }, '-=.15')
-    .from('.hero__title .ln>span', { yPercent: 105, duration: 1.1, stagger: .1, ease: 'expo.out' }, '-=.55')
-    .from('.hero__lead, .hero__cta, .hero__reparti, .nav', { opacity: 0, y: 16, duration: .8, stagger: .08 }, '-=.8');
+  tl.call(() => { window.__introDone = true; dispatchEvent(new Event('logel:intro')); }, null, 2.9);
+  tl.from('.intro__fx', { opacity: 0, scale: .92, duration: .9 }, 0)
+    .to('.intro__line span', { opacity: 1, duration: .25, stagger: .08 }, .6)
+    .to('.intro__fx', { scale: 1.6, opacity: 0, filter: 'blur(10px)', duration: .9, ease: 'expo.in' }, 2.3)
+    .to('.intro__line', { opacity: 0, duration: .4 }, 2.3)
+    .to(intro, { opacity: 0, duration: .5 }, 2.9)
+    .from('.hero__title .ln>span', { yPercent: 105, duration: 1.1, stagger: .1, ease: 'expo.out' }, 3.0)
+    .from('.hero__lead, .hero__cta, .hero__reparti, .hero__cue, .nav', { opacity: 0, y: 16, duration: .8, stagger: .08 }, 3.2);
 
   // hero: si stringe dentro la cornice mentre si scende
-  gsap.to('.hero__copy', { y: -80, opacity: 0, ease: 'none', scrollTrigger: { trigger: '.hero', start: '30% top', end: 'bottom top', scrub: true } });
+  gsap.to('.hero__copy, .hero__reparti, .hero__cue', { y: -60, opacity: 0, ease: 'none', scrollTrigger: { trigger: '.hero', start: 'top top', end: '18% top', scrub: true } });
 
   // tre frasi: si scoprono una dopo l'altra, la traccia di corrente corre sotto
   const claims = $$('.claim span'), trace = $('.claims__trace path'), len = trace.getTotalLength();

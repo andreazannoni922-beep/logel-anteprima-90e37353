@@ -30,11 +30,11 @@ body::after{content:"";position:fixed;inset:-50%;z-index:90;pointer-events:none;
 
 /* apertura */
 .intro{position:fixed;inset:0;z-index:80;background:var(--ink);display:grid;place-items:center;pointer-events:none}
-.intro__strip{display:flex;gap:clamp(10px,2.4vw,36px);align-items:center}
+.intro__fx{position:absolute;inset:0}
 .intro__tile{width:clamp(48px,6.2vw,92px);aspect-ratio:1;overflow:hidden;opacity:0;transform:translateY(20px)}
 .intro__tile--main{width:clamp(58px,7.4vw,112px)}
 .intro__tile img{width:100%;height:100%;object-fit:cover}
-.intro__line{position:absolute;top:calc(50% + clamp(44px,5vw,78px));left:0;right:0;text-align:center;color:var(--grey)}
+.intro__line{position:absolute;top:calc(50% + clamp(150px,17vw,250px));left:0;right:0;text-align:center;color:var(--grey)}
 .intro__line span{opacity:0;display:inline-block}
 .intro__line span:nth-child(odd){color:var(--paper)}
 .intro.done{display:none}
@@ -59,7 +59,8 @@ body::after{content:"";position:fixed;inset:-50%;z-index:90;pointer-events:none;
 .menu p{margin-top:auto;color:var(--grey);line-height:1.9}
 
 /* hero: quadro in punti di luce (motore UberDesigner halvane) */
-.hero{position:relative;height:100svh;min-height:680px;overflow:hidden;background:radial-gradient(120% 90% at 70% 45%,#121a26 0%,#0b0d10 60%)}
+.hero{position:relative;height:340vh;background:#0b0d10}
+.hero__pin{position:sticky;top:0;height:100svh;min-height:640px;overflow:hidden;background:radial-gradient(120% 90% at 70% 45%,#121a26 0%,#0b0d10 60%)}
 .hero__stage{position:absolute;inset:0}
 .hero__gl{width:100%;height:100%;display:block}
 .hero__tip{position:fixed;left:0;top:0;z-index:5;pointer-events:none;opacity:0;transition:opacity .2s;font-weight:600;font-size:13px;letter-spacing:.06em;text-transform:uppercase;display:flex;align-items:center;gap:10px}
@@ -247,3 +248,16 @@ body::after{content:"";position:fixed;inset:-50%;z-index:90;pointer-events:none;
   .hero__copy::before{content:"";position:absolute;inset:-60px -20px -90px;z-index:-1;background:linear-gradient(180deg,rgba(11,13,16,0) 0%,rgba(11,13,16,.88) 34%,#0b0d10 100%)}
 }
 @media (max-width:900px){.hero__lead{display:none}.hero__title{font-size:clamp(32px,9vw,48px)}}
+
+/* hero: richiami del quadro aperto (alla maniera di UberDesigner vibetyper) */
+.hero__callouts{position:absolute;inset:0;pointer-events:none;z-index:3}
+.callout{position:absolute;left:0;top:0;display:flex;align-items:center;gap:12px;opacity:0;transition:opacity .4s;white-space:nowrap}
+.callout i{display:block;width:56px;height:1px;background:linear-gradient(90deg,rgba(61,149,230,.15),rgba(61,149,230,.95))}
+.callout i::after{content:"";position:absolute;margin:-3px 0 0 53px;width:7px;height:7px;border-radius:50%;background:var(--blue-hi);box-shadow:0 0 10px var(--blue-hi)}
+.callout.sx{flex-direction:row-reverse}.callout.sx i{background:linear-gradient(270deg,rgba(61,149,230,.15),rgba(61,149,230,.95))}.callout.sx i::after{margin-left:-3px}
+.callout b{display:block;font-size:15px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;text-shadow:0 0 14px #000}
+.callout small{display:block;font-size:13px;color:rgba(242,242,240,.7);text-shadow:0 0 12px #000}
+.hero__cue{position:absolute;right:var(--pad);bottom:34px;color:rgba(242,242,240,.6);z-index:4}
+.hero__cue::before{content:"";display:inline-block;width:1px;height:28px;background:var(--blue-hi);vertical-align:middle;margin-right:12px;animation:cue 1.8s ease-in-out infinite}
+@keyframes cue{50%{transform:translateY(6px)}}
+@media (max-width:900px){.hero{height:300vh}.hero__cue{display:none}.callout i{width:28px}.callout b{font-size:12px}.callout small{display:none}}

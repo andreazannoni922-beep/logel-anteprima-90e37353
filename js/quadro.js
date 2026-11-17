@@ -177,12 +177,12 @@ function build(rnd, q) {
 
 const vertexShader = `
   attribute float aPart, aSize, aRand; attribute vec4 aEx;
-  uniform float uTime, uReveal, uPx, uGain; uniform float uHi[6]; uniform float uDim[6]; uniform float uEx[6]; uniform float uSel[6];
+  uniform float uTime, uReveal, uPx, uGain, uSpread, uPower; uniform float uHi[6]; uniform float uDim[6]; uniform float uEx[6]; uniform float uSel[6];
   varying vec3 vCol; varying float vA;
   void main(){
     int id = int(aPart + 0.5);
     float e = uEx[id];
-    vec3 p = position + aEx.xyz * e;
+    vec3 p = position + aEx.xyz * e * uSpread;
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     gl_Position = projectionMatrix * mv;
     float depth = -mv.z;
@@ -195,7 +195,8 @@ const vertexShader = `
     float led = step(1.9, aSize) * (0.6 + 0.4 * sin(uTime * 3.0 + aRand * 40.0));
     vCol = mix(mix(base, blue, hi), mix(vec3(1.0), blue, 0.35 + 0.3 * (1.0 - bright)), sel);
     vCol = mix(vCol, vec3(0.35, 0.7, 1.0), led * 0.8);
-    float a = (0.34 + 0.62 * bright) * uDim[id] * (1.0 + hi * 0.4 + sel * 0.25 + led);
+    vCol = mix(vCol, mix(vec3(0.1, 0.5, 1.0), vec3(0.75, 0.9, 1.0), bright), uPower * 0.85);
+    float a = (0.34 + 0.62 * bright) * uDim[id] * (1.0 + hi * 0.4 + sel * 0.25 + led + uPower * 0.9);
     a *= smoothstep(0.4, 1.6, depth) * mix(1.0, uGain, sel);
     a *= clamp(1.4 - depth * 0.05, 0.4, 1.0) * r * (1.0 - aEx.w * e * 0.88);
     vA = a;
@@ -205,12 +206,15 @@ const fragmentShader = `
   varying vec3 vCol; varying float vA;
   void main(){ vec2 c = gl_PointCoord - 0.5; float f = exp(-dot(c, c) * 13.0); if (f < 0.03) discard; gl_FragColor = vec4(vCol * vA * f, 1.0); }`;
 
-export function createQuadro({ canvas, host, tip, reducedMotion, onFocus }) {
+export function createQuadro({ canvas, host, tip, reducedMotion, onFocus, onFrame }) {
   const W = () => host.clientWidth, H = () => host.clientHeight;
   const mobile = Math.min(innerWidth, innerHeight) < 700;
   const rnd = rng(7);
   const g = build(rnd, mobile ? 0.55 : 1);
   const aRand = new Float32Array(g.count); for (let i = 0; i < g.count; i++) aRand[i] = rnd();
+  const exAvg = Array.from({ length: N }, () => [0, 0, 0, 0]);
+  for (let i = 0; i < g.count; i++) { const k = g.part[i], e = exAvg[k]; e[0] += g.explode[i * 4]; e[1] += g.explode[i * 4 + 1]; e[2] += g.explode[i * 4 + 2]; e[3]++; }
+  exAvg.forEach(e => { e[0] /= e[3]; e[1] /= e[3]; e[2] /= e[3]; });
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true, powerPreference: 'high-performance' });
   const dpr = Math.min(devicePixelRatio || 1, 2);
@@ -226,7 +230,7 @@ export function createQuadro({ canvas, host, tip, reducedMotion, onFocus }) {
   geo.setAttribute('aEx', new THREE.BufferAttribute(g.explode, 4));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 6);
   const U = {
-    uTime: { value: 0 }, uReveal: { value: reducedMotion ? 1 : 0 }, uPx: { value: dpr }, uGain: { value: 1 },
+    uTime: { value: 0 }, uSpread: { value: 1 }, uPower: { value: 0 }, uReveal: { value: reducedMotion ? 1 : 0 }, uPx: { value: dpr }, uGain: { value: 1 },
     uHi: { value: new Array(N).fill(0) }, uEx: { value: new Array(N).fill(0) }, uSel: { value: new Array(N).fill(0) }, uDim: { value: new Array(N).fill(1) },
   };
   const mat = new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending });
@@ -275,12 +279,15 @@ export function createQuadro({ canvas, host, tip, reducedMotion, onFocus }) {
   const tpos = new THREE.Vector3(), tlook = new THREE.Vector3(), centre = new THREE.Vector3();
   const hi = new Array(N).fill(0), dim = new Array(N).fill(1);
   let last = performance.now(), raf = 0, visible = true, scroll = 0, t0 = last + 1e9;
+  const stage = { open: 0, centred: 0 };
+  const proj = new THREE.Vector3();
   const narrow = () => W() < 900;
   const aim = () => {
     const fit = Math.max(1, 0.9 / camera.aspect);
     // a computer il quadro sta a destra, lasciando il testo a sinistra
-    const side = narrow() ? 0 : -0.78;
-    tpos.set(side, narrow() ? -0.55 : 0.12, (narrow() ? 6.6 : 5.7) * fit); tlook.set(side, narrow() ? -0.95 : 0, 0);
+    const side = narrow() ? 0 : lerp(-0.78, 0, stage.centred);
+    const back = 1 + stage.open * 0.55;
+    tpos.set(side, narrow() ? -0.55 : 0.12, (narrow() ? 6.6 : 5.7) * fit * back); tlook.set(side, narrow() ? lerp(-0.95, -0.2, stage.centred) : 0, 0);
     if (focus >= 0) {
       const b = boxes[focus]; b.getCenter(centre); model.localToWorld(centre);
       const D = PARTS[focus].dist * (narrow() ? 1.45 : 1);
@@ -298,8 +305,16 @@ export function createQuadro({ canvas, host, tip, reducedMotion, onFocus }) {
     const dt = Math.min(0.05, (now - last) / 1000); last = now;
     const T = Math.max(0, (now - t0) / 1000); U.uTime.value = T;
     if (!reducedMotion) U.uReveal.value = eio(clamp((T - 0.2) / 2.6, 0, 1));
-    const sway = reducedMotion || focus >= 0 ? 0 : Math.sin(T * 0.25) * 0.12 + scroll * 0.6;
-    const ty = (focus >= 0 ? PARTS[focus].yaw : OVER.yaw) + sway, tp = focus >= 0 ? PARTS[focus].pitch : OVER.pitch;
+    const s = scroll;
+    const open = focus >= 0 ? 0 : eio(clamp((s - 0.1) / 0.32, 0, 1)) * (1 - eio(clamp((s - 0.7) / 0.18, 0, 1)));
+    const centred = eio(clamp(s / 0.14, 0, 1));
+    const power = eio(clamp((s - 0.84) / 0.12, 0, 1));
+    stage.open = open; stage.centred = centred;
+    const sway = reducedMotion || focus >= 0 ? 0 : Math.sin(T * 0.25) * 0.12 * (1 - centred);
+    const ty = (focus >= 0 ? PARTS[focus].yaw : lerp(OVER.yaw, 1.0, open) - centred * 0.25 * (1 - open)) + sway;
+    const tp = focus >= 0 ? PARTS[focus].pitch : lerp(OVER.pitch, 0.22, open);
+    U.uSpread.value = focus >= 0 ? 1 : 1.9;
+    U.uPower.value = power;
     const rk = damp(focus >= 0 ? 2.2 : 1.4, dt);
     rot.yaw = lerp(rot.yaw, ty, rk); rot.pitch = lerp(rot.pitch, tp, rk);
     model.rotation.set(rot.pitch, rot.yaw, 0, 'XYZ'); model.updateMatrixWorld(true);
@@ -322,10 +337,20 @@ export function createQuadro({ canvas, host, tip, reducedMotion, onFocus }) {
       U.uHi.value[p] = hi[p]; U.uDim.value[p] = dim[p];
       const want = (p === focus && now - focusAt > 700) || (focus >= 0 && focus !== DOOR && p === DOOR);
       exProg[p] = clamp(exProg[p] + (want ? dt / 2.0 : -dt / 1.2), 0, 1);
-      U.uEx.value[p] = eio(exProg[p]);
+      U.uEx.value[p] = Math.max(eio(exProg[p]), stage.open);
     }
     U.uGain.value = lerp(U.uGain.value, focus >= 0 ? 2.0 : 1, dk);
     renderer.render(scene, camera);
+    if (onFrame) {
+      const r = canvas.getBoundingClientRect();
+      const pts = PARTS.map((P, k) => {
+        boxes[k].getCenter(proj); const e = exAvg[k], sp = U.uSpread.value * U.uEx.value[k];
+        proj.set(proj.x + e[0] * sp, proj.y + e[1] * sp, proj.z + e[2] * sp);
+        model.localToWorld(proj); proj.project(camera);
+        return [r.left + (proj.x * 0.5 + 0.5) * r.width, r.top + (-proj.y * 0.5 + 0.5) * r.height];
+      });
+      onFrame({ pts, open: stage.open, power: U.uPower.value });
+    }
     raf = requestAnimationFrame(frame);
   }
   raf = requestAnimationFrame(frame);

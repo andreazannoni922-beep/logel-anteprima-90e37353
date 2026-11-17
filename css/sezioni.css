@@ -107,3 +107,8 @@
   .tspec__row{grid-template-columns:1fr;gap:8px}
   .arco__copy{top:12vh}
 }
+
+/* CALIBRO · curve di livello di React Bits Topography: la planarità della piastrella */
+.calibro{position:relative;overflow:hidden}
+.calibro__topo{position:absolute;inset:0;z-index:0;opacity:.85}
+.calibro>*:not(.calibro__topo){position:relative;z-index:1}
