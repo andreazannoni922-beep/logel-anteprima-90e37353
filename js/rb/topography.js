@@ -1,4 +1,4 @@
-import{a as Pe,b as Et,c as yt,d as wt}from"./comune-OR3DROEB.js";var j=Pe(Et());var Ye=Pe(yt()),Qt=.32,Ft=9,fe=.05,Ne=160,Ee=1.7,ye=.45,Jt=2.8,Ie=4,Tt=4,Fe=256,ze=48,Ke=2e5,eo=[-.81,.58,-.02],Mt={forward:[0,1],backward:[0,-1],left:[-1,0],right:[1,0]},to=["lift","trace","light"],oo={plus:0,dots:1},ro=1.25,Oe=`
+import{a as Pe,b as Et,c as yt,d as wt}from"./comune-W7MDVSFA.js";var j=Pe(Et());var Ye=Pe(yt()),Qt=.32,Ft=9,fe=.05,Ne=160,Ee=1.7,ye=.45,Jt=2.8,Ie=4,Tt=4,Fe=256,ze=48,Ke=2e5,eo=[-.81,.58,-.02],Mt={forward:[0,1],backward:[0,-1],left:[-1,0],right:[1,0]},to=["lift","trace","light"],oo={plus:0,dots:1},ro=1.25,Oe=`
 precision highp float;
 precision highp int;
 

@@ -112,3 +112,41 @@
 .calibro{position:relative;overflow:hidden}
 .calibro__topo{position:absolute;inset:0;z-index:0;opacity:.85}
 .calibro>*:not(.calibro__topo){position:relative;z-index:1}
+
+/* TRE FRASI · fascio di React Bits LaserFlow che colpisce il piano delle frasi */
+.claims__laser{position:absolute;inset:0;z-index:0}
+.claims__piano{position:absolute;left:18%;right:18%;top:64%;height:2px;z-index:0}
+.claim{z-index:1;text-shadow:0 0 40px #0b0d10}
+
+/* SETTORI · React Bits FlowingMenu */
+.settori{display:block;padding:clamp(90px,11vw,160px) 0 clamp(70px,8vw,120px);background:#0b0d10;color:var(--paper)}
+.settori__testa{display:flex;justify-content:space-between;align-items:flex-end;gap:40px;padding:0 var(--pad);margin-bottom:40px}
+.settori__testa .h2{max-width:13ch}
+.settori__testa p{max-width:340px;color:rgba(242,242,240,.65)}
+.settori__menu{height:min(78vh,720px)}
+.settori__menu .flowing-menu{font-family:var(--f)}
+.settori__menu .flowing-menu__image{border-radius:0!important}
+.settori__note{list-style:none;display:grid;grid-template-columns:repeat(4,1fr);gap:28px;padding:30px var(--pad) 0}
+.settori__note li{font-size:14.5px;color:rgba(242,242,240,.7);border-top:1px solid rgba(61,149,230,.5);padding-top:12px}
+.settori__note b{display:block;color:var(--paper);text-transform:uppercase;font-size:15px;margin-bottom:4px}
+@media (max-width:900px){.settori__testa{flex-direction:column;align-items:flex-start}.settori__menu{height:440px}.settori__note{grid-template-columns:1fr}}
+
+/* CERTIFICAZIONI · React Bits HoloCard */
+.cert{background:#0b0d10;color:var(--paper);border-top:0}
+.cert__row{gap:clamp(30px,6vw,110px)}
+.cert__item{align-items:center;gap:40px}
+.cert__item b{font-size:32px}
+.cert__item p{color:rgba(242,242,240,.75);margin-top:8px}
+.cert__card{flex:none;width:260px;min-height:360px}
+
+/* PIEDE · React Bits MetallicPaint sul marchio */
+.foot{position:relative}
+.foot__metallo{position:absolute;right:var(--pad);top:clamp(50px,6vw,90px);width:min(34vw,460px);height:min(30vw,400px)}
+
+@media (max-width:900px){
+  .cert__item{flex-direction:column;align-items:flex-start}
+  .cert__card{width:220px;min-height:300px}
+  .foot__metallo{position:relative;right:auto;top:auto;width:70vw;height:60vw;margin:0 auto 20px}
+}
+@media (min-width:901px){.foot__big{max-width:62%}.foot__big a{font-size:clamp(40px,5.6vw,100px)}.foot__metallo{top:auto;bottom:140px}}
+.settori__menu .flowing-menu{text-transform:uppercase;font-weight:700;letter-spacing:-.01em}

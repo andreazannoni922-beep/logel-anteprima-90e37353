@@ -22,6 +22,10 @@
 <link rel="stylesheet" href="css/sezioni.css">
 <link rel="stylesheet" href="js/rb/electriclogo.css">
 <link rel="stylesheet" href="js/rb/topography.css">
+<link rel="stylesheet" href="js/rb/metallicpaint.css">
+<link rel="stylesheet" href="js/rb/flowingmenu.css">
+<link rel="stylesheet" href="js/rb/holocard.css">
+<link rel="stylesheet" href="js/rb/laserflow.css">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Organization","name":"Logel s.r.l.","url":"https://www.logel.it/","logo":"https://www.logel.it/img/logo.svg","foundingDate":"1979","vatID":"IT02198670362","email":"logel@logel.it","telephone":"+39 059 536064","address":{"@type":"PostalAddress","streetAddress":"Via della Tecnica 13/A","postalCode":"41051","addressLocality":"Castelnuovo Rangone","addressRegion":"MO","addressCountry":"IT"},"hasCredential":[{"@type":"EducationalOccupationalCredential","name":"ISO 9001:2015 (TÜV Rheinland)"},{"@type":"EducationalOccupationalCredential","name":"UL508A"}],"knowsAbout":["Quadri elettrici","Cablaggi bordo macchina","Software PLC","Schede elettroniche","Controllo planarità piastrelle"]}
 </script>
@@ -88,7 +92,9 @@
 <!-- TRE FRASI FISSATE (Cryox) con la traccia di corrente -->
 <section class="claims" aria-label="In breve">
   <div class="claims__pin">
-    <svg class="claims__trace" viewBox="0 0 1440 900" preserveAspectRatio="none" aria-hidden="true"><path d="M0 700 H260 L330 630 H620 L690 560 H1000 L1060 500 H1440"/></svg>
+    <div class="claims__laser" aria-hidden="true"></div>
+    <div class="claims__piano" aria-hidden="true"></div>
+    <svg hidden class="claims__trace" viewBox="0 0 1440 900" preserveAspectRatio="none" aria-hidden="true"><path d="M0 700 H260 L330 630 H620 L690 560 H1000 L1060 500 H1440"/></svg>
     <h2 class="claim"><span>Un solo fornitore, dal disegno elettrico all'avviamento.</span></h2>
     <h2 class="claim"><span>Progettiamo in EPLAN, cabliamo in officina, programmiamo il PLC.</span></h2>
     <h2 class="claim"><span>Quadri certificati UL508A, pronti anche per USA e Canada.</span></h2>
@@ -132,23 +138,19 @@
   </div>
 </section>
 
-<!-- SETTORI: elenco che si apre (Cryox) -->
+<!-- SETTORI: righe che scorrono con le foto vere (React Bits FlowingMenu) -->
 <section class="settori" id="settori">
-  <div class="settori__left">
+  <div class="settori__testa">
     <h2 class="h2">Dove lavorano i nostri quadri</h2>
-    <figure class="settori__pic chamfer">
-      <img class="is-on" src="img/linea-scelta.webp" alt="Linea ceramica" loading="lazy">
-      <img src="img/meccanica.webp" alt="" loading="lazy">
-      <img src="img/bordo-macchina.webp" alt="" loading="lazy">
-      <img src="img/quadro-macchina.webp" alt="" loading="lazy">
-    </figure>
+    <p>Passa sopra un settore: scorrono le foto delle linee su cui lavoriamo.</p>
   </div>
-  <div class="settori__list">
-    <details open><summary>Ceramica</summary><p>Linee di scelta, levigatrici e squadratrici: quadri, cablaggi bordo macchina e i sistemi di misura Calibro Planar.</p></details>
-    <details><summary>Marmo e pietra</summary><p>Automazione elettrica ed elettronica per gli impianti di lavorazione del marmo.</p></details>
-    <details><summary>Costruttori di macchine automatiche</summary><p>Lavoriamo come vostro reparto elettrico esterno: progetto vostro o nostro, quadro consegnato collaudato.</p></details>
-    <details><summary>Export in Nord America</summary><p>La nostra officina è certificata UL508A: costruiamo quadri industriali conformi per USA e Canada.</p></details>
-  </div>
+  <div class="settori__menu"></div>
+  <ul class="settori__note">
+    <li><b>Ceramica</b> linee di scelta, levigatrici e squadratrici, con i sistemi Calibro Planar.</li>
+    <li><b>Marmo e pietra</b> automazione elettrica ed elettronica per gli impianti del marmo.</li>
+    <li><b>Macchine automatiche</b> siamo il reparto elettrico esterno di chi costruisce macchine.</li>
+    <li><b>Nord America</b> officina UL508A: quadri conformi per USA e Canada.</li>
+  </ul>
 </section>
 
 <!-- CALIBRO PLANAR: scansione dal vivo (HorizonX halftone-field) -->
@@ -174,8 +176,8 @@
 <!-- CERTIFICAZIONI + PIATTAFORME -->
 <section class="cert" id="certificazioni">
   <div class="cert__row">
-    <div class="cert__item"><img src="img/tuv-iso9001.png" alt="Certificazione ISO 9001:2015 TÜV Rheinland" loading="lazy"><p><b>ISO 9001:2015</b>Sistema qualità certificato da TÜV Rheinland, dal 2002.</p></div>
-    <div class="cert__item"><img src="img/ul-listed.png" alt="Marchio cUL us Listed" loading="lazy"><p><b>UL508A</b>Officina abilitata a costruire quadri industriali per USA e Canada.</p></div>
+    <div class="cert__item"><div class="cert__card" data-holo="img/cert-iso.webp"></div><div><b>ISO 9001:2015</b><p>Sistema qualità certificato da TÜV Rheinland Italia per progettazione, fabbricazione, messa in servizio e assistenza di apparati elettrici ed elettronici.</p></div></div>
+    <div class="cert__item"><div class="cert__card" data-holo="img/cert-ul.webp"></div><div><b>UL508A</b><p>Officina abilitata a costruire quadri industriali per il mercato nordamericano, per USA e Canada.</p></div></div>
   </div>
   <div class="marquee" aria-label="Piattaforme su cui lavoriamo"><div class="marquee__in mono">
     <span>Siemens S7 · TIA Portal</span><span>Allen Bradley</span><span>Beckhoff</span><span>Omron</span><span>Saia</span><span>Esa Automation</span><span>ABB</span><span>Fanuc</span><span>Kuka</span><span>EPLAN</span><span>Altium Designer</span><span>OrCAD</span>
@@ -198,6 +200,7 @@
 </main>
 
 <footer class="foot">
+  <div class="foot__metallo" aria-hidden="true"></div>
   <nav class="foot__big" aria-label="Piede">
     <a href="#cosa-facciamo">Cosa facciamo</a><a href="#calibro">Calibro Planar</a><a href="https://www.logel.it/it/p/chi-siamo/17/">Azienda</a><a href="#contatti">Contatti</a>
   </nav>

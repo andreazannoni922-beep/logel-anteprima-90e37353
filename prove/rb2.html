@@ -1,0 +1,15 @@
+<!doctype html><html lang="it"><head><meta charset="utf-8"><title>prova rb2</title>
+<link rel="stylesheet" href="../js/rb/laserflow.css"><link rel="stylesheet" href="../js/rb/holocard.css"><link rel="stylesheet" href="../js/rb/metallicpaint.css">
+<style>body{margin:0;background:#0b0d10;color:#f2f2f0;font-family:sans-serif}.b{height:700px;position:relative;border-bottom:1px solid #333}#sup{position:absolute;left:20%;right:20%;bottom:120px;height:200px;border:1px solid rgba(61,149,230,.4);display:grid;place-items:center;font:700 54px sans-serif}
+#c{display:flex;gap:80px;justify-content:center;align-items:center}</style></head><body>
+<div class="b" id="a"><div id="sup">UN SOLO FORNITORE</div></div><div class="b" id="c"><div id="c1"></div><div id="c2"></div></div><div class="b" id="d"></div>
+<script type="module">
+import { monta as lf } from '../js/rb/laserflow.js';
+import { monta as hc } from '../js/rb/holocard.js';
+import { monta as mp } from '../js/rb/metallicpaint.js';
+const a=document.getElementById('a'); const host=document.createElement('div'); host.style.cssText='position:absolute;inset:0'; a.prepend(host);
+lf(host, { surfaceRef: { current: document.getElementById('sup') }, color: '#1f86ff', beamPosition: .5 });
+hc(document.getElementById('c1'), { image: '../img/cert-iso.webp', width: 300, foilColor: '#cfe3ff' });
+hc(document.getElementById('c2'), { image: '../img/cert-ul.webp', width: 300, foilColor: '#cfe3ff' });
+mp(document.getElementById('d'), { imageSrc: '../img/marchio-pieno.svg', scale: .5 });
+</script></body></html>
