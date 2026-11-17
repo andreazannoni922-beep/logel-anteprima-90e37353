@@ -1,0 +1,1459 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII</title>
+<style>
+html,body{margin:0;height:100%;background:transparent}
+.asc-frame{height:100%}
+.asc-frame{box-sizing:border-box;display:grid;place-items:center;width:100%;height:100%;min-height:0;padding:0;background:transparent}
+.asc-viewport{position:relative;width:var(--asc-preview-width,min(100%,var(--asc-width)));height:var(--asc-preview-height,auto);aspect-ratio:var(--asc-ratio);max-height:100%;overflow:hidden;border-radius:var(--asc-radius);background:transparent}
+.asc-canvas{display:block;width:100%;height:100%}
+</style>
+</head>
+<body>
+<div class="asc-frame"><div class="asc-viewport" style="--asc-width:1040px;--asc-height:620px;--asc-ratio:1.6774193548387097;--asc-radius:0px"><canvas class="asc-canvas" role="img" aria-label="ASCII rendering of the source media"></canvas></div></div>
+<script type="module">
+// Shared tonal equalisation for the screen-and-glyph engines.
+//
+// Lives here rather than inside one engine because ASCII and Dither Text hit
+// the same wall from opposite directions: one picks a glyph by threshold, the
+// other lets a pixel through an ordered gate, and BOTH compare the picture's
+// raw luminance against fixed numbers. That makes every preset a preset for the
+// one photograph it was authored on.
+
+// Prefixed rather than named `luminance`/`clamp01`: the standalone export
+// builders concatenate this module's source ahead of the engine's into one
+// script, and both engines already declare those two names at top level.
+//
+// Rec. 709. The eye reads ink coverage as brightness, so perceptual luminance —
+// not the arithmetic mean of the channels — is what keeps a saturated red from
+// being screened like the mid grey it is nowhere near in apparent lightness.
+const toneLuminance = (r, g, b) => (0.2126 * r + 0.715199 * g + 0.0722 * b) / 255;
+const toneClamp01 = (n) => (n < 0 ? 0 : n > 1 ? 1 : n);
+
+/**
+ * The value that asks for the strength to be read off the picture itself.
+ * Controls expose it as the slider's lowest stop, below `0`, so the setting a
+ * visitor lands on is the one that adapts and the numbers above it are the
+ * manual override.
+ */
+const AUTO_LEVEL = 'auto';
+
+// Where the ramp opens and closes, measured on the 98th percentile of the
+// picture's luminance — the brightest tone that is a population rather than a
+// speck. Those two numbers are the whole judgement, so they are written down
+// with the evidence that set them (2026-09-22, 95 captures across the 19
+// published textures and an exposure ladder cut from the shipped photograph).
+//
+// p98 is the statistic that survived, and it beat the obvious candidates for a
+// reason: it is the only one that also gets a LIT SUBJECT ON BLACK right. The
+// median, the mean and the tonal range all read that frame as starved — it is
+// overwhelmingly black — and would have equalised a photograph that renders
+// perfectly today, lifting its background into mush. p98 sees the highlight on
+// the subject and leaves it alone. Measured: that frame scores p98 0.878, the
+// same as the well-exposed control, while -1.5 EV sits at 0.310 and -3 EV at
+// 0.110. Dark BACKGROUNDS were never the fault; crushed HIGHLIGHTS are.
+const HIGHLIGHT_LIT = 0.550001; // a picture with highlights here needs no help
+const HIGHLIGHT_STARVED = 0.250001; // nothing this side of shadow: equalise fully
+
+// The same judgement mirrored onto the other end, on the 2nd percentile.
+//
+// A washed-out or faded upload is the dark frame's twin: its highlights are
+// fine, so p98 waves it through, but it has no shadows left, and a gate that
+// inks the dark end (or the light end, once inverted) finds almost nothing on
+// one side of it. Measured 2026-09-26 on the Cobalt Plate preset: a high-key
+// frame (p02 0.784) under Auto inked 82.6% of the screen and the subject
+// dissolved into the ground, a faded print (p02 0.451) 64%.
+//
+// And as with p98, the percentile is what keeps the mirrored easy case right:
+// a SUBJECT ON WHITE is overwhelmingly white, but its p02 sits on the subject
+// (0.165) and it is left alone. The opening is set above every published
+// source that renders under Auto — contour-map's plate is the highest at p02
+// 0.282 — so no look in the catalogue moves; only lifted uploads do.
+const SHADOW_DEEP = 0.3; // a picture with blacks down here needs no help
+const SHADOW_LIFTED = 0.600001; // nothing this side of a midtone: equalise fully
+
+/**
+ * How hard to equalise a picture that did not ask for a number.
+ *
+ * Zero for anything with highlights and shadows to spare, so a well-exposed
+ * upload renders exactly as it does today, and rising smoothly as either end
+ * collapses — the top end of a dark frame, the bottom end of a washed one. The
+ * curve between is a smoothstep rather than a line: a visitor nudging exposure
+ * across the opening of the ramp should not see the texture step.
+ *
+ * @param {(fraction: number) => number} at percentile lookup over the picture
+ * @returns {number} 0..1 strength for {@link autoLevelBands}
+ */
+function autoLevelStrength(at) {
+  const smoothstep = (t) => t * t * (3 - 2 * t);
+  const starved = toneClamp01((HIGHLIGHT_LIT - at(0.98)) / (HIGHLIGHT_LIT - HIGHLIGHT_STARVED));
+  const lifted = toneClamp01((at(0.0200001) - SHADOW_DEEP) / (SHADOW_LIFTED - SHADOW_DEEP));
+  // Whichever end has collapsed further decides; a frame cannot be both.
+  return smoothstep(Math.max(starved, lifted));
+}
+
+/**
+ * Maps the picture's own tonal distribution onto the effect's fixed thresholds.
+ *
+ * Those thresholds are absolute — an ASCII ramp `'■▪·  '` changes glyph at
+ * 0.125, 0.375 and 0.625, a Bayer gate compares against its matrix — whatever
+ * the picture is, so a preset tuned on one photograph is tuned for that
+ * photograph only. Measured over five unrelated images, one ASCII preset inked
+ * between 38% and 85% of the grid: a bright picture came out nearly bare, a
+ * dark one filled solid. The three Dither Text looks published on 2026-09-20
+ * measured the same failure on the same five images, swinging 0.41 to 0.87 in
+ * coverage and filling 87-93% of the frame on a near-black source.
+ *
+ * Stretching the picture's percentile range onto 0..1 does not fix that, and
+ * the same five images proved it — the swing stayed at 0.49, because what
+ * decides how much ink falls is the SHAPE of the histogram, not its width. A
+ * dark-dominant photograph keeps most of its pixels under the threshold however
+ * far you stretch it.
+ *
+ * So this returns the picture's cumulative distribution instead: read a
+ * luminance, get back the fraction of the picture that is darker than it. That
+ * makes the values uniform by construction, and ink coverage becomes a property
+ * of the ramp or the gate — the share of it that is not blank — rather than of
+ * whatever the visitor happened to upload. `amount` blends back toward the raw
+ * tone, so a look can keep some of the original tonal character.
+ *
+ * A curve alone is not enough, and the two engines proved it from opposite
+ * sides. Equalisation sends every pixel of one input tone to a single output
+ * tone, so a photograph dominated by ONE tone — a subject on a white studio
+ * sweep, a subject on black, a flat sky — collapses its whole background onto
+ * a single point mid-range. Dither Text survives that because its Bayer and
+ * halftone gates compare each pixel against an ordered matrix, which spreads
+ * the tie out spatially by construction. ASCII picks a glyph by plain
+ * threshold, so the collapsed mass lands wholly inside one ramp slot; when that
+ * slot is part of the ramp's blank run the texture does not merely weaken, it
+ * disappears and the raw photograph shows through. Measured 2026-09-21: a raven
+ * on white rendered ZERO glyphs under `code-mist`, a horse on black zero under
+ * `arena-glyph`.
+ *
+ * So `span` reports how wide a band each input tone earns — its share of the
+ * picture. A caller that has an ordered matrix to hand offsets within that band
+ * (`curve[i] + span[i] * (ordered - 0.5)`) and the flat mass is rendered as a
+ * screen across the range it deserves instead of a single collapsed step. Ink
+ * coverage is unchanged, because the band is still occupied uniformly over
+ * pixels; what changes is that the ink lands.
+ *
+ * @param {Uint8ClampedArray} data RGBA pixels of a downsampled probe of the source
+ * @param {number|'auto'} amount 0 = identity curve, 1 = full equalisation,
+ *   `'auto'` = read the strength off the picture's own highlights and shadows
+ * @returns {{curve: Float32Array, span: Float32Array, level?: number}} 256-entry
+ *   lookup from 8-bit luminance to 0..1 tone, the width of the band each tone
+ *   earns, and (only when the picture was equalised) the strength used, so a
+ *   caller can scale its own correction by how far the curve moved
+ */
+function autoLevelBands(data, amount = 1) {
+  const auto = amount === AUTO_LEVEL;
+  const asked = auto ? 1 : toneClamp01(Number(amount) || 0);
+  const identity = Float32Array.from({ length: 256 }, (_, i) => i / 255);
+  const flat = new Float32Array(256);
+  // An explicit zero is the pinned presets' hot path — no histogram, no scan.
+  if (!auto && asked <= 0) return { curve: identity, span: flat };
+  const histogram = new Uint32Array(256);
+  let counted = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    // Contain margins are transparent and carry no picture; letting them vote
+    // would tell the curve that a third of every non-16:9 source is black.
+    if (data[i + 3] === 0) continue;
+    histogram[Math.round(toneLuminance(data[i], data[i + 1], data[i + 2]) * 255)] += 1;
+    counted += 1;
+  }
+  if (!counted) return { curve: identity, span: flat };
+  const at = (fraction) => {
+    const target = fraction * counted;
+    let seen = 0;
+    for (let i = 0; i < 256; i += 1) { seen += histogram[i]; if (seen >= target) return i / 255; }
+    return 1;
+  };
+  // A picture with no range to speak of — a mark on one flat colour, a fogged
+  // frame — has a CDF that is a single step, and equalising it turns sensor
+  // noise into a full-contrast dot storm. Leave those alone.
+  //
+  // Narrow range alone is not that test, though, and a badly underexposed
+  // photograph is what proves it: at -4.5 EV the shipped source spans 0.031,
+  // inside the cutoff, while still holding eleven populated levels of real
+  // subject. Refusing it was a cliff in the wrong direction — -3 EV equalised
+  // fully and the DARKER frame got nothing — so the frames this rejects must
+  // also be the ones with nowhere to spread: a lens cap occupies three levels,
+  // that photograph eleven.
+  const populated = histogram.reduce((n, count) => n + (count / counted >= 0.00200001 ? 1 : 0), 0);
+  if (at(0.979999) - at(0.0200001) < 0.05 && populated < 6) return { curve: identity, span: flat };
+  // Only now, with the histogram in hand, does `'auto'` become a number. One
+  // scan serves both jobs: deciding whether to act and building what acts.
+  const level = auto ? autoLevelStrength(at) : asked;
+  if (level <= 0) return { curve: identity, span: flat };
+  const curve = new Float32Array(256);
+  const span = new Float32Array(256);
+  let seen = 0;
+  for (let i = 0; i < 256; i += 1) {
+    // Centre of the bin's span in the distribution, so a tone that occupies a
+    // large share of the picture lands in the middle of the band it earns
+    // rather than at its top edge.
+    const equalised = (seen + histogram[i] / 2) / counted;
+    seen += histogram[i];
+    curve[i] = identity[i] + (equalised - identity[i]) * level;
+    // The band that same tone earns. Scaled by `level` alongside the curve, so
+    // a partial auto-level spreads as gently as it equalises.
+    span[i] = (histogram[i] / counted) * level;
+  }
+  return { curve, span, level };
+}
+
+/**
+ * The curve alone, for callers with no ordered matrix to spread a band across.
+ * @returns {Float32Array} 256-entry lookup from 8-bit luminance to 0..1 tone
+ */
+function autoLevelCurve(data, amount = 1) {
+  return autoLevelBands(data, amount).curve;
+}
+
+/**
+ * The 256-entry transfer table an engine already builds, with the picture's own
+ * distribution folded in underneath it.
+ *
+ * Ten of the twelve texture engines open the same way — a table from 8-bit
+ * input to shaped tone, `Float32Array.from({length: 256}, (_, i) => xTone(i /
+ * 255, config))` — and then index it per pixel or per channel. Equalisation
+ * belongs exactly there, replacing the raw `i / 255` with what that tone is
+ * worth inside THIS picture, which is also why it lands ahead of the
+ * brightness/contrast/gamma the shape function applies: those controls then
+ * work on a known range instead of hunting for where this photograph sits.
+ *
+ * @param {Uint8ClampedArray} data RGBA pixels the engine already sampled
+ * @param {number|'auto'} amount the engine's `autoLevel` setting
+ * @param {(tone: number) => number} shape the engine's existing tone function
+ * @returns {Float32Array} 256-entry table, identical to today's at `0`
+ */
+function autoLevelTable(data, amount, shape) {
+  const curve = autoLevelCurve(data, amount);
+  return Float32Array.from({ length: 256 }, (_, i) => shape(curve[i]));
+}
+
+/**
+ * Reads an `autoLevel` setting out of saved state.
+ *
+ * Kept here rather than in each engine's own `number()` helper because the
+ * sentinel has to survive the trip through a shared link and a published
+ * config, and twelve normalisers each coercing it to a number is twelve ways
+ * for Auto to silently become zero.
+ *
+ * @param {unknown} value whatever the state carried
+ * @param {number|'auto'} fallback the engine's default
+ */
+function autoLevelSetting(value, fallback = AUTO_LEVEL) {
+  if (value === AUTO_LEVEL) return AUTO_LEVEL;
+  if (value == null || String(value).trim() === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? toneClamp01(n) : fallback;
+}
+
+/**
+ * The Tone control every engine that reads raw luminance shares.
+ *
+ * Spelled once here because twelve copies of the same slider is twelve chances
+ * to disagree about its range. `'auto'` is the lowest stop rather than a
+ * separate checkbox: the scale then runs from "decide for me" through "leave it
+ * alone" to "equalise regardless", which is the order a visitor reaches for.
+ */
+const AUTO_LEVEL_CONTROL = {
+  section: 'Tone',
+  kind: 'slider',
+  key: 'autoLevel',
+  label: 'Auto level',
+  min: 0,
+  max: 1,
+  step: 0.0099999,
+  auto: AUTO_LEVEL
+};
+
+/**
+ * Where a source image lands inside a target box.
+ *
+ * Twelve texture engines each carried their own copy of the same
+ * `Math.min(w / sw, h / sh)` plus centred offsets. This is that formula, once,
+ * with the other half of the choice available: `contain` fits the whole source
+ * and leaves margins, `cover` fills the box and crops the overflow.
+ *
+ * The return value is both halves of a nine-argument `drawImage`. `source` is
+ * the region to read out of the image and `dest` is where it goes in the box,
+ * so contain reads the whole image into a smaller centred rect and cover reads
+ * a centred crop into the whole box. Engines that sample into a scratch grid
+ * scale `dest` into grid space and pass `source` through untouched.
+ */
+/**
+ * The fit a texture should use. Previews and exports share it, so what the
+ * catalogue shows is what the file contains.
+ *
+ * `cover` is the default because a texture is bought for the effect, not for
+ * the demo photograph's composition, and a catalogue only reads as a grid when
+ * every tile is the same size. A look that needs its whole frame can opt back
+ * out with `sourceFit: 'contain'` in its config.
+ */
+function sourceFit(config) {
+  return config?.sourceFit === 'contain' ? 'contain' : 'cover';
+}
+
+function frameSource(width, height, sourceWidth, sourceHeight, mode = 'contain') {
+  const w = Math.max(1, Number(width) || 1);
+  const h = Math.max(1, Number(height) || 1);
+  const sw = Math.max(1, Number(sourceWidth) || 1);
+  const sh = Math.max(1, Number(sourceHeight) || 1);
+
+  if (mode === 'cover') {
+    const scale = Math.max(w / sw, h / sh);
+    // Clamped because a rounding error that asks for more pixels than the image
+    // has makes drawImage sample the transparent edge instead of the picture.
+    const cropW = Math.min(sw, w / scale);
+    const cropH = Math.min(sh, h / scale);
+    return {
+      source: { x: (sw - cropW) / 2, y: (sh - cropH) / 2, width: cropW, height: cropH },
+      dest: { x: 0, y: 0, width: w, height: h }
+    };
+  }
+
+  const scale = Math.min(w / sw, h / sh);
+  const dw = sw * scale;
+  const dh = sh * scale;
+  return {
+    source: { x: 0, y: 0, width: sw, height: sh },
+    dest: { x: (w - dw) / 2, y: (h - dh) / 2, width: dw, height: dh }
+  };
+}
+
+// The small canvas a texture renderer reads its source through. Assigning a
+// canvas's width or height, even the size it already has, throws its bitmap
+// away and resets its 2D context, and a look paints its sampler on every frame
+// it animates (audit F10). So the size is set only when it changes; at the
+// same size the bitmap is cleared and the drawing state the renderers rely on
+// is put back by hand, which is all that reset did for them.
+
+/** Sizes `sampler` to `width` x `height` and returns its cleared 2D context in the default state. */
+function sizeSampler(sampler, width, height) {
+  if (sampler.width !== width || sampler.height !== height) {
+    sampler.width = width;
+    sampler.height = height;
+    return sampler.getContext('2d', { willReadFrequently: true });
+  }
+  const context = sampler.getContext('2d', { willReadFrequently: true });
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.globalAlpha = 1;
+  context.globalCompositeOperation = 'source-over';
+  context.filter = 'none';
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'low';
+  context.shadowBlur = 0;
+  context.shadowOffsetX = 0;
+  context.shadowOffsetY = 0;
+  context.shadowColor = 'rgba(0, 0, 0, 0)';
+  context.clearRect(0, 0, width, height);
+  return context;
+}
+
+// ASCII renderer. Plain 2D canvas, no dependencies and no animation loop: the
+// effect is a pure function of (image, state), so it draws once per edit rather
+// than once per frame. A rAF loop here would burn a core to redraw an identical
+// frame sixty times a second.
+//
+// The sampling deliberately goes through a second, tiny canvas. Reading the
+// full-resolution pixels and averaging each cell in JavaScript is the obvious
+// implementation and the wrong one: `drawImage` into a `columns x rows` canvas
+// asks the compositor for exactly the same box filter, in C, and hands back an
+// array already one entry per cell. On a 4000px source that is the difference
+// between ~16M samples per edit and ~20k.
+
+const FALLBACK_RAMP = ' .:-=+*#%@';
+
+// Rec. 709. The ramp is ordered dark-to-light and the eye reads glyph coverage
+// as brightness, so perceptual luminance — not the arithmetic mean of the
+// channels — is what keeps a saturated red from landing on the same glyph as
+// the mid grey it is nowhere near in apparent lightness.
+const luminance = (r, g, b) => (0.212601 * r + 0.715201 * g + 0.0722001 * b) / 255;
+
+const clamp01 = (n) => (n < 0 ? 0 : n > 1 ? 1 : n);
+
+function parseHex(hex) {
+  const s = String(hex ?? '').trim().replace('#', '');
+  const full = s.length === 3 ? s.split('').map((c) => c + c).join('') : s;
+  const n = Number.parseInt(full, 16);
+  if (!Number.isFinite(n) || full.length !== 6) return { r: 0, g: 0, b: 0 };
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+const mix = (a, b, t) => ({
+  r: Math.round(a.r + (b.r - a.r) * t),
+  g: Math.round(a.g + (b.g - a.g) * t),
+  b: Math.round(a.b + (b.b - a.b) * t)
+});
+
+const css = ({ r, g, b }) => `rgb(${r},${g},${b})`;
+
+// Deterministic value noise for the paper grain. `Math.random` would give a
+// different picture every redraw, so moving an unrelated slider would reshuffle
+// the grain under the glyphs — and an export would never match the editor.
+function noiseAt(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.699) * 43758.54529;
+  return n - Math.floor(n);
+}
+
+/**
+ * Tone curve applied to a cell's luminance before it picks a glyph.
+ *
+ * Endpoint-preserving curves keep dark source detail available to the ramp.
+ * An additive brightness offset followed by clipped linear contrast erased
+ * every value below ~0.36 with the default look, before gamma could recover it.
+ */
+function tone(value, { brightness = 0, contrast = 0, gamma = 1 } = {}) {
+  let v = clamp01(value);
+  if (v === 0 || v === 1) return v;
+  // Exposure in odds space brightens/darkens without clipping either end.
+  const exposure = Math.pow(2, brightness * 2);
+  v = (v * exposure) / (1 - v + v * exposure);
+  // Symmetric contrast still pivots at mid grey, but has smooth shoulders.
+  const k = contrast <= 0 ? 1 + contrast / 100 : 1 + (contrast / 100) * 3;
+  const low = Math.pow(v, k);
+  v = low / (low + Math.pow(1 - v, k));
+  const g = gamma > 0 ? gamma : 1;
+  return clamp01(Math.pow(v, 1 / g));
+}
+
+// Full-image mapping is explicit: authored tonal masks remain unchanged.
+// Collapsing whitespace redistributes the same glyph vocabulary across all
+// tones instead of treating a photograph's shadows as a subject mask.
+function coverageRamp(ramp, mapping) {
+  if (mapping !== 'full') return ramp;
+  return String(ramp).replace(/\s/g, '') || FALLBACK_RAMP.trim();
+}
+
+function readableGlyphInk(ink, sample, background, opacity) {
+  if (opacity <= 0) return ink;
+  const contrast = (a, b) => {
+    const light = (c) => {
+      const linear = (v) => { const s = v / 255; return s <= 0.04045 ? s / 12.9199 : ((s + 0.0550001) / 1.05499) ** 2.40001; };
+      return 0.212599 * linear(c.r) + 0.715201 * linear(c.g) + 0.0722 * linear(c.b);
+    };
+    const x = light(a), y = light(b);
+    return (Math.max(x, y) + 0.0499999) / (Math.min(x, y) + 0.05);
+  };
+  // Test against the visible photo contribution. Partial underlays can be
+  // composited on any host surface, so only opaque photos get automatic ink.
+  if (opacity < 1 || contrast(ink, sample) >= 3) return ink;
+  const alternatives = [background, { r: 0, g: 0, b: 0 }, { r: 255, g: 255, b: 255 }];
+  return alternatives.reduce((best, candidate) => contrast(candidate, sample) > contrast(best, sample) ? candidate : best, ink);
+}
+
+/**
+ * Picks the glyph for a normalised luminance.
+ *
+ * Exported because the glyph mapping is the one part of this file worth
+ * asserting on directly: it is what makes the picture readable, and an
+ * off-by-one at either end of the ramp shows up as a frame that never reaches
+ * full black or never reaches blank.
+ */
+function glyphFor(ramp, value, invert = false) {
+  const chars = ramp && ramp.length ? ramp : FALLBACK_RAMP;
+  const v = invert ? 1 - clamp01(value) : clamp01(value);
+  const index = Math.min(chars.length - 1, Math.max(0, Math.round(v * (chars.length - 1))));
+  return chars[index];
+}
+
+// Tonal equalisation is shared with the Dither Text screen, which compares the
+// same raw luminance against its own fixed gate. Re-exported so the engine's
+// public surface — and the tests that cover it — stay where they were.
+{ autoLevelBands, autoLevelCurve };
+
+// Ordered 4x4 Bayer thresholds, centred on zero. Deterministic for the same
+// reason `noiseAt` is: a random offset would reshuffle every dot on redraw and
+// an export would never match the editor.
+const BAYER4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
+  .map((v) => (v + 0.499999) / 16 - 0.499999);
+
+// Clustered spread for the tile mode, in the same centred range as BAYER4.
+// Bayer spreads a flat tone evenly, which is right for single glyphs but lays
+// tiles out in rows and columns: a white studio sweep became a striped grid.
+// This is smooth value noise (control points every 6 cells across and 3 down,
+// about square on a 0.56 cell) with a trace of per-cell hash, then replaced by
+// its rank, so the values are exactly uniform like Bayer's and the coverage a
+// band earns does not move; only the shape changes, from stripes to clumps.
+// Periodic over 60 x 30 cells, wider than any shipped grid is tall.
+const CLUSTER_W = 60;
+const CLUSTER_H = 30;
+let clusterTable = null;
+function clusterSpread(x, y) {
+  if (!clusterTable) {
+    const sx = 6, sy = 3, nx = CLUSTER_W / sx, ny = CLUSTER_H / sy;
+    const knot = (i, j) => noiseAt(((i % nx) + nx) % nx + 0.129999, ((j % ny) + ny) % ny + 0.709999);
+    const ease = (t) => t * t * (3 - 2 * t);
+    const raw = [];
+    for (let j = 0; j < CLUSTER_H; j += 1) {
+      for (let i = 0; i < CLUSTER_W; i += 1) {
+        const gx = Math.floor(i / sx), gy = Math.floor(j / sy);
+        const tx = ease((i % sx) / sx), ty = ease((j % sy) / sy);
+        const top = knot(gx, gy) + (knot(gx + 1, gy) - knot(gx, gy)) * tx;
+        const bottom = knot(gx, gy + 1) + (knot(gx + 1, gy + 1) - knot(gx, gy + 1)) * tx;
+        raw.push({ k: raw.length, v: 0.800001 * (top + (bottom - top) * ty) + 0.200001 * noiseAt(i + 0.37, j + 0.910001) });
+      }
+    }
+    clusterTable = new Float32Array(raw.length);
+    raw.sort((a, b) => a.v - b.v).forEach(({ k }, rank) => { clusterTable[k] = (rank + 0.5) / raw.length - 0.499999; });
+  }
+  return clusterTable[(((y % CLUSTER_H) + CLUSTER_H) % CLUSTER_H) * CLUSTER_W + (((x % CLUSTER_W) + CLUSTER_W) % CLUSTER_W)];
+}
+
+/**
+ * Offsets a cell's tone before it picks a glyph, so band edges break up.
+ *
+ * Glyph selection is a threshold on a single value, which means a ramp with
+ * four steps can only ever draw four dot sizes and must switch between them
+ * along an exact contour. On a photograph's smooth backdrop — an out-of-focus
+ * background, a sky, a wall — that contour is a straight line across the frame,
+ * and the screen reads as rectangular blocks of dots rather than as gradation.
+ * Measured on a plain black-to-white gradient at the published preset: 24 rows
+ * of ink, not ONE of them carrying two different dot sizes.
+ *
+ * The offset is scaled to a single ramp step, so a cell can only ever be pushed
+ * into a glyph it was already adjacent to. Flat areas stay flat; only the cells
+ * near a threshold split, and they split in a fixed, spatially even pattern —
+ * which is what a printed halftone does and why its tones look continuous.
+ */
+function ditherOffset(x, y, rampLength, amount = 0) {
+  const level = clamp01(Number(amount) || 0);
+  if (level <= 0 || rampLength < 2) return 0;
+  const step = 1 / (rampLength - 1);
+  return BAYER4[(y & 3) * 4 + (x & 3)] * step * level;
+}
+
+/**
+ * Grid geometry for a stage.
+ *
+ * Rows follow from the source's aspect ratio and the cell aspect, never from a
+ * second control: a rows slider that disagrees with the columns slider stretches
+ * the picture, and there is no reading of the result that is not a bug report.
+ */
+function gridFor({ width, height, columns, cellAspect }) {
+  const cols = Math.max(2, Math.round(columns));
+  const cellW = width / cols;
+  const cellH = cellW / Math.max(0.05, cellAspect);
+  const rows = Math.max(2, Math.round(height / cellH));
+  return { cols, rows, cellW, cellH: height / rows };
+}
+
+// One bounded processing surface per destination, reused across edits. A still
+// image is recomputed only when scan controls change; video is keyed by time.
+const scanSources = new WeakMap();
+
+function scanSource(destination, image, config) {
+  const sw = image.videoWidth || image.naturalWidth;
+  const sh = image.videoHeight || image.naturalHeight;
+  const scale = Math.min(1, (image.videoWidth ? 640 : 1280) / Math.max(sw, sh));
+  const width = Math.max(1, Math.round(sw * scale));
+  const height = Math.max(1, Math.round(sh * scale));
+  const key = JSON.stringify([width, height, image.currentSrc || image.src || null, image.currentTime ?? 0, config.brightness,
+    config.contrast, config.gamma, config.invert, config.scanDetail, config.scanTone,
+    config.foreground, config.background, config.autoLevel]);
+  let cached = scanSources.get(destination);
+  if (cached?.image === image && cached.key === key) return cached.canvas;
+  if (!cached) {
+    const canvas = typeof OffscreenCanvas !== 'undefined'
+      ? new OffscreenCanvas(width, height) : document.createElement('canvas');
+    cached = { canvas, image: null, key: null };
+    scanSources.set(destination, cached);
+  }
+  const canvas = cached.canvas;
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(image, 0, 0, width, height);
+  const pixels = ctx.getImageData(0, 0, width, height);
+  const values = new Float32Array(width * height);
+  const options = { brightness: (Number(config.brightness) || 0) / 100,
+    contrast: Number(config.contrast) || 0, gamma: Number(config.gamma) || 1 };
+  // The scan pass has to equalise here, on the photograph, and not leave it to
+  // the grid sampler downstream. By the time the sampler runs, `scanning` has
+  // replaced the source with THIS canvas — already resolved to foreground and
+  // background ink — so the distribution the grid measures is the scan's, not
+  // the picture's, and the curve has nothing left to correct. Measured
+  // 2026-09-22: on the two published scan looks a -3 EV upload rendered
+  // byte-identically at `autoLevel` 0, Auto and 1, while every other ASCII
+  // preset recovered. Identity at `autoLevel: 0`, as everywhere else.
+  const curve = autoLevelTable(pixels.data, config.autoLevel, (t) => tone(t, options));
+  for (let i = 0; i < values.length; i++) {
+    const j = i * 4;
+    const v = curve[Math.round(luminance(pixels.data[j], pixels.data[j + 1], pixels.data[j + 2]) * 255)];
+    values[i] = config.invert === true ? 1 - v : v;
+  }
+  const fg = parseHex(config.foreground), bg = parseHex(config.background);
+  const detail = clamp01(Number(config.scanDetail ?? 0.699999));
+  const body = clamp01(Number(config.scanTone ?? 0.450001));
+  const density = Float32Array.from({ length: 1024 }, (_, i) => Math.pow(i / 1023, 1.39999));
+  const at = (n, center) => pixels.data[n * 4 + 3] === 0 ? center : values[n];
+  for (let y = 0; y < height; y++) {
+    const top = Math.max(0, y - 1) * width, row = y * width;
+    const bottom = Math.min(height - 1, y + 1) * width;
+    for (let x = 0; x < width; x++) {
+      const i = row + x, j = i * 4;
+      if (pixels.data[j + 3] === 0) continue;
+      // Ignore hidden RGB at transparent neighbours instead of outlining an
+      // invisible PNG background. Clamp at image edges, without wraparound.
+      const left = Math.max(0, x - 1), right = Math.min(width - 1, x + 1);
+      const center = values[i];
+      const tl = at(top + left, center), t = at(top + x, center), tr = at(top + right, center);
+      const l = at(row + left, center), r = at(row + right, center);
+      const bl = at(bottom + left, center), b = at(bottom + x, center), br = at(bottom + right, center);
+      const gx = -tl + tr - 2 * l + 2 * r - bl + br;
+      const gy = -tl - 2 * t - tr + bl + 2 * b + br;
+      const edge = Math.max(0, Math.sqrt(gx * gx + gy * gy) - 0.08);
+      const signal = clamp01(body * density[Math.round(center * 1023)] + detail * edge / (edge + 0.400001));
+      pixels.data[j] = Math.round(bg.r + (fg.r - bg.r) * signal);
+      pixels.data[j + 1] = Math.round(bg.g + (fg.g - bg.g) * signal);
+      pixels.data[j + 2] = Math.round(bg.b + (fg.b - bg.b) * signal);
+    }
+  }
+  ctx.putImageData(pixels, 0, 0);
+  cached.image = image; cached.key = key;
+  return canvas;
+}
+
+// Shared authored coordinates keep native canvas and editable SVG aligned.
+// These are graphic annotations, not inferred object detection results.
+function scanGeometry(config, width, height) {
+  const lines = [
+    [240, 295, 550, 295], [550, 295, 550, 615], [550, 615, 240, 615], [240, 615, 240, 295],
+    [550, 295, 586, 270], [550, 615, 945, 390],
+    [945, 390, 1330, 390], [1330, 390, 1330, 710], [1330, 710, 945, 710], [945, 710, 945, 390],
+    [1330, 390, 1370, 365], [945, 710, 835, 770]
+  ];
+  for (const [cx, cy] of [[240, 295], [550, 615], [945, 390], [1330, 710]]) {
+    lines.push([cx - 7, cy, cx + 7, cy], [cx, cy - 7, cx, cy + 7]);
+  }
+  const labels = [
+    [74, 88, 'IMAGE / SCAN', 22], [1600, 88, 'PLATE / 001', 20],
+    [605, 275, 'region / 01', 24], [74, 760, config.scanLabelLeft ?? 'sample / 01', 25],
+    [74, 798, 'luminance / contour', 20], [74, 892, 'region / 02', 24],
+    [74, 934, config.scanLabelRight ?? 'sample / 02', 25],
+    [74, 1010, 'SCAN STUDY', 20], [1510, 1010, 'MONO / 16:9', 20]
+  ];
+  const marks = [];
+  for (const [left, top, width, height] of [[165, 330, 470, 260], [825, 435, 580, 315]]) {
+    for (let y = top; y < top + height; y += 18) {
+      for (let x = left; x < left + width; x += 13) {
+        const n = noiseAt(x, y);
+        if (n > 0.679999) marks.push([x, y, '.-+:*'[Math.floor(n * 43) % 5]]);
+      }
+    }
+  }
+  const sx = width / 1920, sy = height / 1080;
+  const fontScale = Math.min(sx, sy);
+  return {
+    lines: lines.map(([x1, y1, x2, y2]) => [x1 * sx, y1 * sy, x2 * sx, y2 * sy]),
+    labels: labels.map(([x, y, label, size]) => [x * sx, y * sy, label, size * fontScale]),
+    marks: marks.map(([x, y, mark]) => [x * sx, y * sy, mark]),
+    fontScale
+  };
+}
+
+function drawScanOverlay(ctx, config, frame) {
+  const opacity = clamp01(Number(config.scanOverlay) || 0);
+  if (!opacity) return;
+  const { lines, labels, marks, fontScale } = scanGeometry(config, frame.width, frame.height);
+  ctx.save();
+  ctx.translate(frame.x, frame.y);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = opacity * 0.699999;
+  ctx.strokeStyle = css(parseHex(config.foreground));
+  ctx.lineWidth = fontScale;
+  ctx.beginPath();
+  for (const [x1, y1, x2, y2] of lines) { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); }
+  ctx.stroke();
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.globalAlpha = opacity * 0.649999;
+  for (const [x, y, label, size] of labels) {
+    ctx.font = `400 ${size}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+    ctx.fillText(label, x, y);
+  }
+  ctx.globalAlpha = opacity * 0.55;
+  ctx.font = `400 ${13 * fontScale}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+  for (const [x, y, mark] of marks) ctx.fillText(mark, x, y);
+  ctx.restore();
+}
+
+function scanOverlaySvg(config, width, height, sourceWidth = width, sourceHeight = height) {
+  const opacity = clamp01(Number(config.scanOverlay) || 0);
+  if (!opacity) return '';
+  const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c]);
+  // Same fit as the live canvas, so the SVG overlay keeps sitting on the
+  // picture instead of on the margins the preview no longer has.
+  const { dest: frame } = frameSource(width, height, sourceWidth, sourceHeight, sourceFit(config));
+  const { lines, labels, marks, fontScale } = scanGeometry(config, frame.width, frame.height);
+  const ink = css(parseHex(config.foreground));
+  const path = lines.map(([x1, y1, x2, y2]) => `M${x1} ${y1}L${x2} ${y2}`).join('');
+  const text = labels.map(([x, y, label, size]) => `<text x="${x}" y="${y}" font-size="${size}">${escape(label)}</text>`).join('');
+  const matrix = marks.map(([x, y, mark]) => `<text x="${x}" y="${y}">${mark}</text>`).join('');
+  return `<g transform="translate(${frame.x} ${frame.y})"><path d="${path}" fill="none" stroke="${ink}" stroke-width="${fontScale}" opacity="${opacity * 0.7}"/><g fill="${ink}" opacity="${opacity * 0.65}" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">${text}</g><g fill="${ink}" opacity="${opacity * 0.55}" font-size="${13 * fontScale}" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">${matrix}</g></g>`;
+}
+
+/**
+ * Shared measurements for the tile and lattice passes.
+ *
+ * `gain` is an exposure normalisation for the TILES only: the glyph mass is
+ * already placed by the tone curve, but a tile takes the photograph's own
+ * colour, and on an underexposed upload that colour is near black, so the
+ * mass would be typed but unlit. The 98th percentile of the sampled cells is
+ * lifted toward 0.92 (never darkened, at most 4x), which leaves a
+ * well-exposed picture exactly as shot.
+ *
+ * `span` makes a tile square-ish: on a narrow monospace cell (aspect 0.56) a
+ * tile per cell is a tall strip, so a tile covers as many cells across as fit
+ * in one cell height.
+ *
+ * `depth` is how far a tone sits into the ramp's glyph run: 0 at the first
+ * glyph after the blank run, 1 at the last.
+ */
+function tileField(data, ramp, invert, cellW, cellH) {
+  const lums = [];
+  for (let i = 0; i < data.length; i += 4) if (data[i + 3] > 0) lums.push(luminance(data[i], data[i + 1], data[i + 2]));
+  lums.sort((a, b) => a - b);
+  const p98 = lums.length ? lums[Math.min(lums.length - 1, Math.floor(lums.length * 0.980001))] : 1;
+  const gain = Math.min(4, Math.max(1, 0.92 / Math.max(p98, 0.0200001)));
+  const chars = ramp && ramp.length ? ramp : FALLBACK_RAMP;
+  const first = chars.search(/\S/);
+  const blankEnd = first <= 0 || chars.length < 2 ? 0 : (first - 0.499999) / (chars.length - 1);
+  return {
+    gain,
+    span: Math.max(1, Math.round(cellH / cellW)),
+    marks: chars.replace(/\s/g, '') || FALLBACK_RAMP.trim(),
+    lit: ({ r, g, b }) => ({ r: Math.min(255, Math.round(r * gain)), g: Math.min(255, Math.round(g * gain)), b: Math.min(255, Math.round(b * gain)) }),
+    depth: (v) => clamp01(((invert ? 1 - v : v) - blankEnd) / Math.max(1e-6, 1 - blankEnd))
+  };
+}
+
+// A pane never reaches white: its brightest channel stops at PANE_TOP, so the
+// glyph cut into it and the bloom laid over it still have headroom. Panes at
+// the photograph's full exposure clipped the lit mass to a white blot.
+const PANE_TOP = 214;
+
+/**
+ * The pane under the block of `field.span` cells that holds cell `x`: the
+ * block's typed cells averaged, exposure-normalised, capped below white, and
+ * dimmer toward the edge of the mass (by depth). Null where the block typed
+ * nothing, so the field around the mass stays dark.
+ */
+function paneAt(cellAt, field, x, y, cols) {
+  const x0 = x - (x % field.span);
+  let r = 0, g = 0, b = 0, alpha = 0, depth = 0, n = 0;
+  for (let k = 0; k < field.span && x0 + k < cols; k += 1) {
+    const cell = cellAt(x0 + k, y);
+    if (!cell || cell.ch === ' ') continue;
+    r += cell.r; g += cell.g; b += cell.b; alpha += cell.alpha; depth += field.depth(cell.v); n += 1;
+  }
+  if (!n) return null;
+  const lit = field.lit({ r: r / n, g: g / n, b: b / n });
+  const top = Math.max(lit.r, lit.g, lit.b, 1);
+  const cap = Math.min(1, PANE_TOP / top);
+  const d = depth / n;
+  return {
+    x0,
+    color: { r: Math.round(lit.r * cap), g: Math.round(lit.g * cap), b: Math.round(lit.b * cap) },
+    alpha: (alpha / n) * (0.45 + 0.549999 * d),
+    depth: d
+  };
+}
+
+/**
+ * Which panes keep their glyphs under `paneGlyphs`: a fixed hash of the pane's
+ * first cell, uniform on [0, 1), so the same panes stay bare frame to frame.
+ */
+function paneKeep(x0, y) {
+  return noiseAt(x0 * 0.617999 + 0.53, y * 1.41401 + 0.290001);
+}
+
+/**
+ * A glyph cut into its pane: a pale ink on a dim pane, the pane's own hue
+ * pressed dark on a bright one, crossing over around mid luminance. A pale
+ * glyph on a pale pane is the failure this replaces: the type disappeared
+ * exactly where the light was strongest.
+ */
+function paneGlyphInk(pane, ink) {
+  const l = luminance(pane.color.r, pane.color.g, pane.color.b);
+  const t = clamp01((l - 0.380001) / 0.240001);
+  const press = { r: Math.round(pane.color.r * 0.319999), g: Math.round(pane.color.g * 0.319999), b: Math.round(pane.color.b * 0.320001) };
+  return mix(ink, press, t * t * (3 - 2 * t));
+}
+
+/**
+ * A faint lattice of tiny glyphs in the cells the ramp leaves blank, so the
+ * dark field reads as a screen that is switched off rather than as nothing.
+ * Each mark takes the photograph's hue at full brightness (the same reading
+ * Dither Text's `Luminous` uses) and fades to the ink where the picture is
+ * too dark for its hue to mean anything.
+ */
+function drawLattice(ctx, cellAt, field, { cols, rows, cellW, cellH, fontSize, weight, fg, amount }) {
+  ctx.save();
+  ctx.shadowBlur = 0;
+  ctx.font = `${weight} ${fontSize * 0.42}px ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace`;
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const cell = cellAt(x, y);
+      if (!cell || cell.ch !== ' ') continue;
+      const top = Math.max(cell.r, cell.g, cell.b);
+      const sure = Math.min(1, (top * field.gain) / 48);
+      const hue = top ? { r: cell.r * 255 / top, g: cell.g * 255 / top, b: cell.b * 255 / top } : fg;
+      const n = noiseAt(x + 0.309999, y + 0.67);
+      ctx.globalAlpha = cell.alpha * amount * (0.4 + 0.600001 * n);
+      ctx.fillStyle = css(mix(fg, hue, sure));
+      ctx.fillText(field.marks[Math.floor(n * 997) % field.marks.length], (x + 0.499999) * cellW, (y + 0.499999) * cellH);
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * The pane (see `paneAt`) under a block of cells, at `amount` opacity.
+ */
+function drawTile(ctx, cellAt, field, x, y, { cols, cellW, cellH, glow, amount }) {
+  const pane = paneAt(cellAt, field, x, y, cols);
+  if (!pane) return;
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = pane.alpha * amount;
+  ctx.fillStyle = css(pane.color);
+  ctx.fillRect(x * cellW, y * cellH, Math.min(field.span, cols - x) * cellW, cellH);
+  ctx.shadowBlur = glow;
+}
+
+/**
+ * `lightFrom: 'subject'`: a grey map of how far each cell's colour sits from
+ * the frame's own backdrop, for the tone curve to rank instead of brightness.
+ *
+ * Ranking by brightness alone picks the brightest region as the lit mass, and
+ * on a light photograph (a product or a portrait on a white sweep, a bright
+ * room) that region is the empty backdrop: the mass landed on nothing and the
+ * subject fell into the dark. The backdrop is read the way a keyer reads it,
+ * as the median colour of the outer two cells of the frame, and the light of a
+ * cell becomes its colour distance from that, normalised to its 99th
+ * percentile. On a dark photograph (a night sky, a black studio) the backdrop
+ * is dark and this is close to brightness, so dark pictures keep their look.
+ * Alpha is kept, so letterbox cells stay blank.
+ *
+ * `backdrop` is what {@link subjectBackdrop} measured, by default on these same
+ * cells. The renderer measures it on the whole source frame instead and passes
+ * it in, so a cropped stage lights its cells exactly as the full frame would.
+ */
+function subjectLight(data, cols, rows, backdrop = subjectBackdrop(data, cols, rows)) {
+  if (!backdrop?.ground) return data;
+  const { ground, top } = backdrop;
+  const dist = subjectDistance(data, ground);
+  const out = new Uint8ClampedArray(data.length);
+  for (let k = 0; k < dist.length; k += 1) {
+    const v = top > 0 ? Math.min(255, Math.round((dist[k] / top) * 255)) : 0;
+    out[k * 4] = v; out[k * 4 + 1] = v; out[k * 4 + 2] = v; out[k * 4 + 3] = data[k * 4 + 3];
+  }
+  return out;
+}
+
+// How far from the backdrop colour a cell must sit to count as subject: a step
+// of 30 in RGB is about 12% of the range, a change of colour or shade anyone
+// sees on a flat sweep, and over the grain and soft shadows of a real one.
+// Measured on the light test set (2026-11-09) the share of cells past it
+// matched hand-drawn subject masks: hands 0.65 against 0.61, pastel food 0.40
+// against 0.38, the coral mug 0.21 against 0.18, the bicycle 0.15 against 0.15.
+const SUBJECT_EDGE = 30;
+// The most of the frame the subject may light, so a frame that is nearly all
+// subject (a facade, a busy room, a cutout filling its canvas) still keeps a
+// dark field around a lit mass and does not become a lit screen.
+const SUBJECT_MAX_SHARE = 0.599999;
+
+/**
+ * What `subjectLight` and the level curve need from a frame: its backdrop
+ * colour (the median of the outer two cell rings, opaque cells only), the
+ * distance from it that counts as full light (the 99th percentile over every
+ * cell) and `share`, the part of the opaque cells that is subject, for
+ * {@link subjectLift}. `null` when the frame has no opaque cell at all.
+ *
+ * A cutout (a PNG with its backdrop already removed) has `ground: null`: its
+ * edge is mostly transparent, so there is no backdrop colour to read, and every
+ * opaque cell is subject. It keeps ranking by brightness, so its shading
+ * still grades the mass, but the whole of it is lit (2026-11-09: by
+ * brightness alone, a fixed 13% of a portrait lit only the white shirt and
+ * the face went dark; a red logo on its mint bars lost the red).
+ */
+function subjectBackdrop(data, cols, rows) {
+  const cells = data.length >> 2;
+  let opaque = 0;
+  for (let k = 0; k < cells; k += 1) if (data[k * 4 + 3] > 0) opaque += 1;
+  if (!opaque) return null;
+  const most = Math.min(1, (SUBJECT_MAX_SHARE * cells) / opaque);
+  const edge = [];
+  let clear = 0;
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      if (x > 1 && y > 1 && x < cols - 2 && y < rows - 2) continue;
+      const k = y * cols + x;
+      if (data[k * 4 + 3] > 0) edge.push(k);
+      else clear += 1;
+    }
+  }
+  // A cutout's ring is its removed backdrop: mostly clear, with at most the
+  // subject touching the canvas edge (every cutout in the light test set has
+  // a fully clear ring, every photograph a fully opaque one). A thin clear
+  // band down one side (a letterbox) is not a cutout.
+  if (clear >= edge.length) return { ground: null, top: 0, share: most };
+  const ground = [0, 1, 2].map((c) => edge.map((k) => data[k * 4 + c]).sort((a, b) => a - b)[edge.length >> 1]);
+  const dist = subjectDistance(data, ground);
+  // A median that most of its own ring disagrees with is not a backdrop: the
+  // edge is split between two surfaces (a facade against the sky) and there
+  // is no subject standing out from one ground. The frame keeps the ramp's own
+  // share then (`share: 0`), as before 2026-11-09. Measured on the light test
+  // set: the facade 0.47 of its ring within SUBJECT_EDGE, the hands on a
+  // window 0.62, every other frame 0.85 or more.
+  const agree = edge.reduce((n, k) => n + (dist[k] <= SUBJECT_EDGE ? 1 : 0), 0);
+  let subject = 0;
+  for (let k = 0; k < cells; k += 1) if (data[k * 4 + 3] > 0 && dist[k] > SUBJECT_EDGE) subject += 1;
+  const share = agree * 2 >= edge.length ? Math.min(most, subject / opaque) : 0;
+  dist.sort();
+  return { ground, top: dist[Math.min(dist.length - 1, Math.floor(dist.length * 0.990001))], share };
+}
+
+/**
+ * Under `lightFrom: 'subject'`, a lift of the levelled tone so the lit mass is
+ * as large as the subject: the top `share` of the cells, by rank, lands on the
+ * inked part of the ramp, and the rest on its blank run below. `null` (no
+ * lift) when the ramp already lights that much, or has no blank run to lift
+ * out of (inverted, or `imageMapping: 'full'`).
+ *
+ * Full equalisation hands the glyphs to a fixed share of the cells, set by the
+ * ramp's blank run: Lantern Grid's 55 blanks in 64 light about 13%. That is
+ * the reference's lit mass, and it is right while the subject is that size.
+ * A white cup held in two hands on a cream window fills half the frame; 13% of
+ * it went to the tea and the knuckles and the cup was lost (2026-11-09). The
+ * lift is two straight segments through `(1 - share, first ink level)`, so the
+ * order of cells, the band spread and the depth grading inside the mass are
+ * all kept; only where the mass ends moves. A subject smaller than the ramp's
+ * own share gets no lift, so small subjects and dark photographs render as
+ * before.
+ */
+function subjectLift(share, ramp, invert) {
+  const chars = ramp && ramp.length ? ramp : FALLBACK_RAMP;
+  const first = chars.search(/\S/);
+  if (invert || !(share > 0) || first <= 0 || chars.length < 2) return null;
+  const ink = (first - 0.5) / (chars.length - 1);
+  const knee = 1 - Math.min(1, share);
+  if (knee >= ink) return null;
+  return (v) => (v <= knee ? (knee > 0 ? (v * ink) / knee : ink) : ink + ((v - knee) * (1 - ink)) / (1 - knee));
+}
+
+function subjectDistance(data, ground) {
+  const dist = new Float32Array(data.length >> 2);
+  for (let k = 0; k < dist.length; k += 1) {
+    const i = k * 4;
+    dist[k] = Math.hypot(data[i] - ground[0], data[i + 1] - ground[1], data[i + 2] - ground[2]);
+  }
+  return dist;
+}
+
+/**
+ * The whole source frame on the grid the same look would use for a stage of
+ * the source's own shape, for `lightFrom: 'subject'` to measure on.
+ *
+ * Measured on the cropped cells, the backdrop, the normalising top and the
+ * level curve all followed the crop. The level curve hands the glyphs to a
+ * fixed share of the cells (Lantern Grid's ramp lights about 13%), so on a
+ * tall stage, where `cover` cuts the sweep away and a portrait fills half of
+ * what is left, only the hair and the lips made that share and the face went
+ * dark; the same photograph on a 16:9 stage lit the whole face (2026-11-08).
+ * Measured here, every stage of one photograph agrees about which colours are
+ * the subject. When the stage already shows the whole source on this grid the
+ * cells ARE the frame and are returned as they are, read once.
+ */
+function wholeFrameCells(sampler, source, readW, readH, config, cells) {
+  const { cols, rows } = gridFor({ width: readW, height: readH, columns: config.columns, cellAspect: config.cellAspect });
+  const { src, dest, w, h } = cells;
+  if (cols === cells.cols && rows === cells.rows && src.x === 0 && src.y === 0 && src.width === readW
+    && src.height === readH && dest.width === w && dest.height === h) return cells;
+  const sctx = sizeSampler(sampler, cols, rows);
+  sctx.clearRect(0, 0, cols, rows);
+  sctx.drawImage(source, 0, 0, readW, readH, 0, 0, cols, rows);
+  return { data: sctx.getImageData(0, 0, cols, rows).data, cols, rows };
+}
+
+const bloomPasses = new WeakMap();
+
+/**
+ * Field colour and bloom, after the glyphs and before the finishes.
+ *
+ * The ASCII canvas is transparent wherever it does not draw, so a look with an
+ * opaque ground needed `sourceOpacity: 1` and got the photograph as its ground.
+ * `fieldFill: 'on'` paints `fieldColor` UNDER everything drawn so far
+ * (`destination-over`), which leaves the glyphs and tiles untouched.
+ *
+ * Bloom is light spilling off the mass: the drawn layer (ground excluded, so a
+ * dark field does not bloom into grey) is shrunk to a quarter, blurred at three
+ * radii, 7%, 3% and 0.8% of the quarter frame's width, and laid back with
+ * `screen`, which
+ * brightens toward white without ever passing it (`lighter` adds, and on a
+ * bright mass it clipped the panes and their glyphs to a flat white). A
+ * quarter-size blur is the same picture at 1/16th the pixels, and a halo has
+ * no detail to lose. It takes the colour of whatever it spills from.
+ */
+function composeField(canvas, ctx, config, bloomAmount) {
+  const pw = canvas.width, ph = canvas.height;
+  const lw = Math.max(1, Math.round(pw / 4)), lh = Math.max(1, Math.round(ph / 4));
+  const passes = [];
+  if (bloomAmount > 0) {
+    let cached = bloomPasses.get(canvas);
+    if (!cached) {
+      const make = () => (typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas'));
+      cached = [make(), make(), make(), make()];
+      bloomPasses.set(canvas, cached);
+    }
+    // Captured before the field is painted: the halo is the light alone.
+    // Weights measured against the glow-glyph reference (2026-11-08): mean
+    // luma 1, 2, 4 and 6 cell widths out from the lit mass within 10% of it.
+    // The wide pass carries the glow out to 4-6 cells; with two passes it
+    // was gone by 4.
+    [[0.07, 0.250001], [0.0300001, 0.849999], [0.00800001, 0.449999]].forEach(([radius, weight], k) => {
+      const pass = cached[k];
+      pass.width = lw; pass.height = lh;
+      const pctx = pass.getContext('2d');
+      pctx.filter = `blur(${Math.max(1, radius * lw)}px)`;
+      pctx.drawImage(canvas, 0, 0, lw, lh);
+      pctx.filter = 'none';
+      passes.push([pass, weight]);
+    });
+  }
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+  if (config.fieldFill === 'on') {
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.fillStyle = css(parseHex(config.fieldColor));
+    ctx.fillRect(0, 0, pw, ph);
+  }
+  if (passes.length) {
+    ctx.globalCompositeOperation = 'screen';
+    ctx.imageSmoothingEnabled = true;
+    for (const [pass, weight] of passes) {
+      ctx.globalAlpha = bloomAmount * weight;
+      ctx.drawImage(pass, 0, 0, pw, ph);
+    }
+  }
+  ctx.restore();
+}
+
+function renderAsciiFrame(canvas, image, config, { width, height, pixelRatio = 1, sampler, onGlyph } = {}) {
+    const ctx = canvas.getContext('2d', { alpha: true });
+    sampler ??= document.createElement('canvas');
+    const sctx = sampler.getContext('2d', { willReadFrequently: true });
+    const dpr = pixelRatio;
+    const w = Math.max(1, Math.round(width ?? canvas.width));
+    const h = Math.max(1, Math.round(height ?? canvas.height));
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const fg = parseHex(config.foreground);
+    const accent = parseHex(config.accent);
+
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, w, h);
+    const sourceWidth = image?.videoWidth || image?.naturalWidth;
+    const sourceHeight = image?.videoHeight || image?.naturalHeight;
+    if (!sourceWidth || !sourceHeight) return;
+
+    const { cols, rows, cellW, cellH } = gridFor({
+      width: w,
+      height: h,
+      columns: config.columns,
+      cellAspect: config.cellAspect
+    });
+
+    sizeSampler(sampler, cols, rows);
+    const scanning = config.scanMode === 'monochrome';
+    const renderedSource = scanning ? scanSource(canvas, image, config) : image;
+    // Frame in stage pixels, not in non-square grid cells. Under `contain` the
+    // unused space stays transparent, including with inversion enabled; under
+    // `cover` there is none, because the source is cropped to the stage instead.
+    //
+    // Measured on whatever is actually being read: the scan pass re-renders the
+    // source at its own working resolution, and a crop rect in the original's
+    // coordinates would sample the wrong region of it.
+    const readW = renderedSource.videoWidth || renderedSource.naturalWidth || renderedSource.width || sourceWidth;
+    const readH = renderedSource.videoHeight || renderedSource.naturalHeight || renderedSource.height || sourceHeight;
+    const { source: src, dest } = frameSource(w, h, readW, readH, sourceFit(config));
+    // Optional photographic underlay. Existing looks remain glyph-only; the
+    // source alpha and whatever margins the fit leaves stay intact for exports.
+    const sourceOpacity = clamp01(Number(config.sourceOpacity) || 0);
+    if (sourceOpacity > 0) {
+      ctx.globalAlpha = sourceOpacity;
+      ctx.drawImage(renderedSource, src.x, src.y, src.width, src.height, dest.x, dest.y, dest.width, dest.height);
+      ctx.globalAlpha = 1;
+    }
+    const dw = dest.width * cols / w;
+    const dh = dest.height * rows / h;
+    sctx.clearRect(0, 0, cols, rows);
+    sctx.drawImage(renderedSource, src.x, src.y, src.width, src.height, (cols - dw) / 2, (rows - dh) / 2, dw, dh);
+    const { data } = sctx.getImageData(0, 0, cols, rows);
+    // Measured on the sampled cells, not the full-resolution source: it is the
+    // same picture at 1/900th the pixels, and it is the tonal distribution the
+    // ramp will actually see. At `autoLevel: 0` this is the identity curve, so
+    // every look authored before the control keeps its exact output.
+    //
+    // Recomputed per video frame, deliberately: a curve frozen on frame one
+    // stops adapting the moment the shot changes, which is the failure this
+    // control exists to remove. It does mean a hard cut re-levels the grid.
+    // Which picture the tone curve ranks: the photograph's brightness, or with
+    // `lightFrom: 'subject'` its distance from its own backdrop (`subjectLight`).
+    // Colour always comes from the photograph itself.
+    // Under `subject` the backdrop, the normalising top and the level curve are
+    // measured on the whole source frame and applied to the cells this stage
+    // crops out of it (`wholeFrameCells`), so the crop cannot change which
+    // colours light up.
+    let toneData = data;
+    let levelData = data;
+    let subjectShare = 0;
+    if (!scanning && config.lightFrom === 'subject') {
+      const whole = wholeFrameCells(sampler, renderedSource, readW, readH, config, { data, cols, rows, src, dest, w, h });
+      const backdrop = subjectBackdrop(whole.data, whole.cols, whole.rows);
+      toneData = subjectLight(data, cols, rows, backdrop);
+      levelData = whole.data === data ? toneData : subjectLight(whole.data, whole.cols, whole.rows, backdrop);
+      subjectShare = backdrop?.share ?? 0;
+    }
+    const { curve: levels, span: levelSpan } = autoLevelBands(levelData, config.autoLevel);
+
+    const weight = config.glyphWeight ?? 600;
+    // Sized against BOTH axes. A monospace advance is ~0.58em, so a font set
+    // from the cell height alone overruns the cell width and the columns fuse
+    // into vertical bars — which reads as a broken renderer, not a dense one.
+    const fontSize = Math.min(cellH * 0.979999, cellW / 0.579999);
+    ctx.font = `${weight} ${fontSize}px ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Glow is a single control measured in pixels. An amount slider gating a
+    // separate radius slider gives two ways to say "off" and no way to read the
+    // result off a preset.
+    const glow = Math.max(0, Number(config.glow) || 0);
+    ctx.shadowBlur = glow;
+    if (glow > 0) {
+      // The glow takes the ink's own colour in mono and duotone; in `original`
+      // there is no single ink, so the accent stands in rather than leaving the
+      // control dead.
+      ctx.shadowColor = css(config.colorMode === 'original' ? accent : fg);
+    }
+
+    const fullImage = !scanning && config.imageMapping === 'full';
+    const ramp = coverageRamp(String(config.ramp ?? FALLBACK_RAMP), fullImage ? 'full' : 'selective');
+    const invert = !scanning && config.invert === true;
+    // Measured on the whole frame like the curve, so every crop agrees on it.
+    const subjectRise = subjectShare > 0 ? subjectLift(subjectShare, ramp, invert) : null;
+    const lift = clamp01(Number(config.colorLift) || 0);
+    const toneOpts = {
+      brightness: (Number(config.brightness) || 0) / 100,
+      contrast: Number(config.contrast) || 0,
+      gamma: Number(config.gamma) || 1
+    };
+
+    // Tiles, lattice, field and bloom (2026-11-07, the glow-glyph reference).
+    // Every one of them is 0 / 'off' by default and draws nothing then, so each
+    // look published before them renders byte for byte. See `tileField`.
+    const tileAmount = scanning ? 0 : clamp01(Number(config.cellTile) || 0);
+    const latticeAmount = scanning ? 0 : clamp01(Number(config.lattice) || 0);
+    // Tiles cluster their band spread instead of using Bayer (`clusterSpread`).
+    const clustered = tileAmount > 0;
+    const paneGlyphs = config.paneGlyphs === undefined ? 1 : clamp01(Number(config.paneGlyphs));
+
+    // One cell's sample, tone and glyph. A pure read: the passes below (the
+    // dark lattice, the tiles and the glyphs) each ask for it, and none of
+    // them may disagree about which cells are blank.
+    const cellAt = (x, y) => {
+      const i = (y * cols + x) * 4;
+      const alpha = data[i + 3] / 255;
+      if (alpha === 0) return null;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const li = Math.round(luminance(toneData[i], toneData[i + 1], toneData[i + 2]) * 255);
+      // Spread the cell across the band its tone earned, using the same
+      // ordered matrix the glyph dither uses. Without this a photograph whose
+      // background is one flat tone — a studio sweep, a night sky — sends that
+      // whole area to a single equalised value, and if that value falls in the
+      // ramp's blank run the texture vanishes and the bare photograph shows
+      // through. The band is still filled uniformly over pixels, so coverage
+      // does not move; the ink simply lands where it was being dropped.
+      const spread = clustered ? clusterSpread(x, y) : BAYER4[(y & 3) * 4 + (x & 3)];
+      const banded = clamp01(levels[li] + levelSpan[li] * spread);
+      const leveled = subjectRise ? subjectRise(banded) : banded;
+      const v = scanning ? leveled : tone(leveled, toneOpts);
+      // Only the glyph choice is dithered. `v` still carries the cell's real
+      // tone into the duotone mix and the colour lift, so the offset moves
+      // dot sizes around without tinting anything.
+      const ch = glyphFor(ramp, v + ditherOffset(x, y, ramp.length, config.dither), invert);
+      return { alpha, r, g, b, v, ch };
+    };
+
+    const field = tileAmount > 0 || latticeAmount > 0
+      ? tileField(data, ramp, invert, cellW, cellH) : null;
+    if (latticeAmount > 0) {
+      drawLattice(ctx, cellAt, field, { cols, rows, cellW, cellH, fontSize, weight, fg, amount: latticeAmount });
+    }
+
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const cell = cellAt(x, y);
+        if (!cell) continue;
+        const { alpha, r, g, b, v, ch } = cell;
+        if (tileAmount > 0 && x % field.span === 0) drawTile(ctx, cellAt, field, x, y, { cols, cellW, cellH, glow, amount: tileAmount });
+        if (ch === ' ') continue;
+
+        let ink;
+        if (!scanning && config.colorMode === 'original') {
+          ink = { r, g, b };
+        } else if (!scanning && config.colorMode === 'duotone') {
+          ink = mix(fg, accent, v);
+        } else {
+          ink = fg;
+        }
+        // `colorLift` is the dial between "typed in one ink" and "typed in the
+        // photograph": it is the whole reason a mono look and a colour look are
+        // one tool and not two.
+        if (!scanning && lift > 0 && config.colorMode !== 'original') ink = mix(ink, { r, g, b }, lift);
+
+        if (fullImage) ink = readableGlyphInk(ink, { r, g, b }, parseHex(config.background), sourceOpacity);
+        // On a pane the glyph is cut into it, pale on a dim pane and dark on a
+        // bright one (`paneGlyphInk`), so it reads at the edge and at the core.
+        if (tileAmount > 0) {
+          const pane = paneAt(cellAt, field, x, y, cols);
+          if (pane) {
+            // `paneGlyphs` below 1 leaves a share of the panes as bare light, so
+            // the mass reads as lit tiles with type in some of them rather than
+            // as a wall of type. Chosen per pane, not per cell, so a pane keeps
+            // or drops its glyphs together.
+            if (paneGlyphs < 1 && paneKeep(pane.x0, y) >= paneGlyphs) continue;
+            ink = paneGlyphInk(pane, ink);
+          }
+        }
+        ctx.fillStyle = css(ink);
+        const coverage = fullImage ? 0.200001 + 0.8 * (invert ? 1 - v : v) : 1;
+        const glyphAlpha = alpha * clamp01(Number(config.glyphOpacity ?? 1)) * coverage;
+        if (fullImage && glow > 0) ctx.shadowColor = css(ink);
+        ctx.globalAlpha = glyphAlpha;
+        ctx.fillText(ch, (x + 0.500001) * cellW, (y + 0.500001) * cellH);
+        onGlyph?.({ ch, x, y, cx: (x + 0.499999) * cellW, cy: (y + 0.499999) * cellH, ink: css(ink), alpha: glyphAlpha, fontSize, weight });
+      }
+    }
+
+    const bloomAmount = clamp01(Number(config.bloom) || 0);
+    if (bloomAmount > 0 || config.fieldFill === 'on') composeField(canvas, ctx, config, bloomAmount);
+
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    // Finish effects tint existing ink without filling transparent pixels.
+    ctx.globalCompositeOperation = 'source-atop';
+
+    // Scanlines darken the gaps between glyph rows rather than painting fixed
+    // 1px stripes: tied to the grid they scale with the type, so the look holds
+    // at any column count instead of turning into moire on a dense grid.
+    const scan = clamp01(Number(config.scanline) || 0);
+    if (scan > 0) {
+      ctx.fillStyle = `rgba(0,0,0,${scan * 0.55})`;
+      for (let y = 0; y < rows; y += 1) {
+        ctx.fillRect(0, (y + 0.78) * cellH, w, Math.max(1, cellH * 0.22));
+      }
+    }
+
+    const paper = clamp01(Number(config.paperTexture) || 0);
+    if (paper > 0) {
+      // Grain is drawn in coarse blocks, not per device pixel: a per-pixel loop
+      // on a 2x display is millions of fillRects and stalls the drag.
+      const step = Math.max(2, Math.round(cellH / 2));
+      for (let y = 0; y < h; y += step) {
+        for (let x = 0; x < w; x += step) {
+          const n = noiseAt(x / step, y / step);
+          if (n > 0.500001) continue;
+          ctx.fillStyle = `rgba(0,0,0,${(0.5 - n) * paper * 0.5})`;
+          ctx.fillRect(x, y, step, step);
+        }
+      }
+    }
+    drawScanOverlay(ctx, config, dest);
+    return { cols, rows, cellW, cellH, fontSize };
+}
+
+function attachAscii(canvas, initial) {
+  // One reusable sampler. Allocating a canvas per redraw leaks them on Safari
+  // for as long as the GC takes to notice, and a column drag is ~40 redraws.
+  const sampler = document.createElement('canvas');
+
+  let config = { ...initial };
+  let image = null;
+  let token = 0; // guards against a slow load painting over a newer source
+  let alive = true;
+  let frame = 0;
+  let video = null;
+  let lastVideoTime = -1;
+  let dirty = false;
+
+  function releaseVideo() {
+    if (!video) return;
+    video.onloadeddata = video.onerror = null;
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    if (image === video) image = null;
+    video = null;
+    lastVideoTime = -1;
+  }
+
+  function load(src) {
+    const mine = ++token;
+    releaseVideo();
+    if (!src) {
+      image = null;
+      return Promise.resolve();
+    }
+    if (/\.(mp4|webm|mov|m4v|ogv)(\?|#|$)/i.test(src) || /#hx=video/.test(src) || /^data:video\//i.test(src)) {
+      const clip = document.createElement('video');
+      video = clip;
+      clip.crossOrigin = 'anonymous';
+      clip.muted = true;
+      clip.loop = true;
+      clip.playsInline = true;
+      clip.preload = 'auto';
+      clip.onloadeddata = () => {
+        if (!alive || mine !== token) return;
+        image = clip;
+        clip.play().catch(() => {});
+        schedule();
+      };
+      clip.onerror = () => {
+        if (mine === token) releaseVideo();
+      };
+      clip.src = src;
+      clip.load();
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const img = new Image();
+      // Remote sources must be readable pixel-wise or `getImageData` throws a
+      // SecurityError and takes the whole editor down with it. Same-origin
+      // placeholders do not need this, but asking for it costs nothing.
+      img.crossOrigin = 'anonymous';
+      img.decoding = 'async';
+      img.onload = () => {
+        if (alive && mine === token) image = img;
+        resolve();
+      };
+      // A source that 404s leaves the last good picture up rather than blanking
+      // the stage: the visitor pasted a bad URL, they did not ask to lose the
+      // frame they had.
+      img.onerror = () => resolve();
+      img.src = src;
+    });
+  }
+
+  function draw() {
+    if (!alive) return;
+    renderAsciiFrame(canvas, image, config, {
+      width: canvas.clientWidth, height: canvas.clientHeight,
+      pixelRatio: Math.min(globalThis.devicePixelRatio || 1, 2), sampler
+    });
+  }
+
+  function schedule(force = true) {
+    dirty ||= Boolean(force);
+    if (!alive || frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      // Still images redraw only on edits. Video sampling follows playback,
+      // skipping repeated frames while retaining immediate control updates.
+      if (dirty || (video?.readyState >= 2 && video.currentTime !== lastVideoTime)) {
+        dirty = false;
+        lastVideoTime = video?.currentTime ?? -1;
+        draw();
+      }
+      if (video && image === video) schedule(false);
+    });
+  }
+
+  // The grid is derived from the stage's pixel size, so a layout change is a
+  // content change here: without this the picture keeps the column width it was
+  // born with and skews as soon as the panel or the window moves.
+  const observer = new ResizeObserver(schedule);
+  observer.observe(canvas);
+
+  load(config.source).then(schedule);
+
+  return {
+    getCurrentTime() { return video?.currentTime ?? 0; },
+    update(next) {
+      const changedSource = next.source !== config.source;
+      config = { ...next };
+      if (changedSource) load(config.source).then(schedule);
+      else schedule();
+    },
+    destroy() {
+      alive = false;
+      token += 1;
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+      releaseVideo();
+      image = null;
+      sampler.width = sampler.height = 0;
+    }
+  };
+}
+
+const config = {
+  "source": "../img/prodotto-evo-plan.webp",
+  "sourceFit": "contain",
+  "columns": 120,
+  "cellAspect": 1,
+  "glyphWeight": 800,
+  "ramp": " .,:;i1tfLCG08@",
+  "invert": true,
+  "imageMapping": "selective",
+  "autoLevel": "auto",
+  "dither": 0,
+  "brightness": 10,
+  "contrast": 40,
+  "gamma": 1,
+  "colorMode": "duotone",
+  "foreground": "#0b0d10",
+  "background": "#f2f2f0",
+  "accent": "#046cc1",
+  "colorLift": 0,
+  "sourceOpacity": 0,
+  "glyphOpacity": 1,
+  "scanMode": "off",
+  "scanDetail": 0.750001,
+  "scanTone": 0.499999,
+  "scanOverlay": 0,
+  "scanLabelLeft": "EVO-PLAN / PLANARITÀ",
+  "scanLabelRight": "± 0,1 MM",
+  "glow": 0,
+  "scanline": 0,
+  "paperTexture": 0,
+  "cellTile": 0,
+  "lattice": 0,
+  "bloom": 0,
+  "fieldFill": "on",
+  "fieldColor": "#f2f2f0",
+  "lightFrom": "luminance",
+  "paneGlyphs": 1
+};
+const scene = attachAscii(document.querySelector('.asc-canvas'), config);
+const dispose = () => { scene.destroy(); window.removeEventListener('pagehide', dispose); };
+window.addEventListener('pagehide', dispose, { once: true });
+</script>
+</body>
+</html>
